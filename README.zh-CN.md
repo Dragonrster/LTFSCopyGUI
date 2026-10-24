@@ -63,6 +63,19 @@ v3.x LTFS直接读写
     lang.ini to set language (Currently en for English, zh for Chinese Simplified. zh Default)
     if no lang.ini exist, will follow system language setting
 
+### 一键构建（build.ps1）
+
+在仓库根目录运行（需要 Windows + Visual Studio，含 .NET 桌面开发与 C++ 桌面开发工作负载）：
+
+    .\build.ps1                  # 构建主程序（x64 Release）+ Tools/CmParser
+    .\build.ps1 -Package         # 构建完成后打包 dist\LTFSCopyGUI-portable.zip
+    .\build.ps1 -Target CmParser # 只构建 CM 解析器
+    .\build.ps1 -Clean           # 清理后重新构建
+
+脚本会自动处理本机环境差异：缺少 .NET Framework 4.8 参考程序集时从 NuGet 下载到本地缓存；缺少 .NET Framework SDK 工具（AxImp/TlbImp/al.exe）与 mscoree.lib 时使用兼容方案（不影响中文界面）；FtpServer 为 SDK 风格工程，会自动定位 MSBuild SDK。
+
+Rust 加速组件（ltfscopy_fastreader.dll / ltfscopy_schema.dll）需要 rustup nightly 与 x86_64-win7-windows-msvc target；未安装时脚本会跳过并提示，不影响带库操作、CM 读取与 CM 解析等基础功能。
+
 ---
 
 演示视频（bilibili）：**[BV1j24y177PF](https://www.bilibili.com/video/BV1j24y177PF)**  **[BV1Gy4y1f7WP](https://www.bilibili.com/video/BV1Gy4y1f7WP)**

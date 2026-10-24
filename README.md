@@ -33,6 +33,17 @@ For tapes with encryption enabled, do not enable automatic tape reloading (disab
 `config/lang.ini` to set language (Currently en for English, zh for Chinese Simplified. zh Default).
 If no `config/lang.ini` exist, will follow system language setting.
 
+## Build
+
+Requires Windows with Visual Studio (".NET desktop development" and "Desktop development with C++" workloads).
+
+    .\build.ps1                  # build LTFSCopyGUI (x64 Release) and Tools/CmParser
+    .\build.ps1 -Package         # also create dist\LTFSCopyGUI-portable.zip
+    .\build.ps1 -Target CmParser # build the standalone CM parser only
+    .\build.ps1 -Clean           # clean and rebuild
+
+The script provisions missing .NET Framework 4.8 reference assemblies from NuGet and works around missing .NET Framework SDK tools (AxImp/TlbImp/al.exe, mscoree.lib). Rust components (`ltfscopy_fastreader.dll` / `ltfscopy_schema.dll`) are built when cargo with the nightly toolchain is available; otherwise they are skipped with a warning and the base features keep working.
+
 ---
 
 演示视频（bilibili）：**[BV1j24y177PF](https://www.bilibili.com/video/BV1j24y177PF)**  **[BV1Gy4y1f7WP](https://www.bilibili.com/video/BV1Gy4y1f7WP)**
