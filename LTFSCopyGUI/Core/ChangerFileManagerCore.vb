@@ -728,13 +728,18 @@ Friend NotInheritable Class ChangerFileManagerCore
 #Region "文件提取"
 
     ''' <summary>把一个索引中被勾选的文件提取到目标文件夹。磁带会自动装载并归位。</summary>
-    Friend Function ExtractFiles(slot As TapeSlot, items As List(Of SelectedFile), targetRoot As String, Optional driveElement As MediumChanger.Element = Nothing) As Integer
+    Friend Function ExtractFiles(slot As TapeSlot, items As List(Of SelectedFile), targetRoot As String,
+                                 Optional driveElement As MediumChanger.Element = Nothing,
+                                 Optional progress As Action(Of Long) = Nothing,
+                                 Optional handleTracking As Action(Of IntPtr) = Nothing) As Integer
         If slot Is Nothing Then Throw New ArgumentNullException(NameOf(slot))
         EnsureChanger()
         If items Is Nothing OrElse items.Count = 0 Then Return 0
         If String.IsNullOrWhiteSpace(targetRoot) Then Throw New ArgumentException("提取目标文件夹为空。", NameOf(targetRoot))
         Directory.CreateDirectory(targetRoot)
         Using mount As MountedTape = MountTape(slot, driveElement)
+            If handleTracking IsNot Nothing Then handleTracking(mount.Handle)
+            Try
             Dim layout As TapeLayout = ReadTapeLayout(mount.Handle)
             Dim plan As ExtractionPlan = BuildExtractionPlan(items, layout)
             Dim extractedFiles As Integer = 0
@@ -762,7 +767,7 @@ Friend NotInheritable Class ChangerFileManagerCore
                         If File.Exists(tempPath) Then File.Delete(tempPath)
                         tempPaths(planItem.Item) = tempPath
                     End If
-                    ReadExtentToFile(mount.Handle, layout, planItem, tempPath, lastPosition)
+                    ReadExtentToFile(mount.Handle, layout, planItem, tempPath, lastPosition, progress)
                     Dim written As Integer = 0
                     writtenCounts.TryGetValue(planItem.Item, written)
                     written += 1
@@ -787,6 +792,9 @@ Friend NotInheritable Class ChangerFileManagerCore
             End Try
             LogMessage($"[{slot.Barcode}] 提取完成：{extractedFiles} 个文件。")
             Return extractedFiles
+            Finally
+                If handleTracking IsNot Nothing Then handleTracking(IntPtr.Zero)
+            End Try
         End Using
     End Function
 
@@ -832,7 +840,7 @@ Friend NotInheritable Class ChangerFileManagerCore
     End Function
 
     ''' <summary>定位到 extent 起始块并把 extent 数据写入临时文件（首块按 byteoffset 截断）。</summary>
-    Private Sub ReadExtentToFile(handle As IntPtr, layout As TapeLayout, planItem As ExtractionPlanItem, tempPath As String, ByRef lastPosition As TapeUtils.PositionData)
+    Private Sub ReadExtentToFile(handle As IntPtr, layout As TapeLayout, planItem As ExtractionPlanItem, tempPath As String, ByRef lastPosition As TapeUtils.PositionData, Optional progress As Action(Of Long) = Nothing)
         Dim extent As ltfsindex.file.extent = planItem.Extent
         Dim partition As Byte = planItem.PartitionNumber
         Dim startBlock As ULong = CULng(extent.startblock)
@@ -863,6 +871,7 @@ Friend NotInheritable Class ChangerFileManagerCore
                 End If
                 Dim writeLength As Long = Math.Min(remaining, available)
                 output.Write(data, CInt(byteOffset), CInt(writeLength))
+                If progress IsNot Nothing Then progress(writeLength)
                 remaining -= writeLength
                 byteOffset = 0L
             End While
@@ -1091,6 +1100,68 @@ Friend NotInheritable Class ChangerFileManagerCore
     Private Sub RaiseProgress(message As String)
         If _progress IsNot Nothing Then _progress(message)
     End Sub
+
+#End Region
+
+#Region "提取监控辅助"
+
+    ''' <summary>通过 WERL 日志页 0x88 读取磁头错误率（log10 形式，0 表示无错误）。
+    ''' 读取使用与提取相同的 SCSI 操作锁，并用短超时 TryEnter，避免拖慢提取。</summary>
+    Friend NotInheritable Class HeadErrorRateReader
+        Private ReadOnly _lastC1Err(63) As Integer
+        Private ReadOnly _lastNoCCPs(63) As Integer
+
+        Friend Function TryRead(handle As IntPtr, ByRef logRate As Double) As Boolean
+            logRate = 0
+            If handle = IntPtr.Zero OrElse handle = New IntPtr(-1) Then Return False
+            Dim handleLock As Object = TapeUtils.GetSCSIOperationLock(handle)
+            If Not Threading.Monitor.TryEnter(handleLock, 30) Then Return False
+            Try
+                Dim header As Byte() = TapeUtils.SCSIReadParam(handle, New Byte() {&H1C, &H1, &H88, &H0, &H4, &H0}, 4, Nothing, 1)
+                If header Is Nothing OrElse header.Length <> 4 Then Return False
+                Dim pageLen As Integer = (CInt(header(2)) << 8) Or CInt(header(3))
+                If pageLen = 0 Then Return False
+                pageLen += 4
+                Dim page As Byte() = TapeUtils.SCSIReadParam(handle, New Byte() {&H1C, &H1, &H88, CByte((pageLen >> 8) And &HFF), CByte(pageLen And &HFF), &H0}, pageLen, Nothing, 1)
+                If page Is Nothing OrElse page.Length <= 4 Then Return False
+                Dim tokens As String() = Text.Encoding.ASCII.GetString(page, 4, page.Length - 4).Split(New Char() {ChrW(13), ChrW(10), ChrW(9)}, StringSplitOptions.RemoveEmptyEntries)
+                Dim result As Double = Double.NegativeInfinity
+                Dim dataValid As Boolean = False
+                Dim hasNullChannel As Boolean = False
+                For ch As Integer = 4 To tokens.Length - 5 Step 5
+                    Dim chan As Integer = (ch - 4) \ 5
+                    If chan < 0 OrElse chan >= _lastC1Err.Length Then Continue For
+                    Dim c1Err As Integer = 0
+                    Dim noCCPs As Integer = 0
+                    If Not Integer.TryParse(tokens(ch), Globalization.NumberStyles.HexNumber, Nothing, c1Err) Then Continue For
+                    If Not Integer.TryParse(tokens(ch + 4), Globalization.NumberStyles.HexNumber, Nothing, noCCPs) Then Continue For
+                    Dim deltaCCPs As Long = CLng(noCCPs) - CLng(_lastNoCCPs(chan))
+                    If deltaCCPs > 0L Then
+                        dataValid = True
+                        Dim deltaErrs As Long = CLng(c1Err) - CLng(_lastC1Err(chan))
+                        If deltaErrs >= 0L AndAlso deltaErrs < deltaCCPs Then
+                            Dim rateLog As Double = Math.Log10(CDbl(deltaErrs) / CDbl(deltaCCPs) / 2.0 / 1920.0)
+                            If rateLog < 0 Then result = Math.Max(result, rateLog)
+                        End If
+                    Else
+                        hasNullChannel = True
+                    End If
+                    _lastC1Err(chan) = c1Err
+                    _lastNoCCPs(chan) = noCCPs
+                Next
+                If Not dataValid Then Return False
+                If hasNullChannel Then result = Math.Max(result, -2.98)
+                If Double.IsNegativeInfinity(result) Then result = 0
+                If result < -10 Then result = 0
+                logRate = result
+                Return True
+            Catch ex As Exception
+                Return False
+            Finally
+                Threading.Monitor.Exit(handleLock)
+            End Try
+        End Function
+    End Class
 
 #End Region
 

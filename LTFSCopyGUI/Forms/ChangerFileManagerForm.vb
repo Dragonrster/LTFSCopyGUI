@@ -465,6 +465,18 @@ Friend Class ChangerFileManagerForm
             End If
         End If
 
+        Dim monitor As ChangerExtractionMonitorForm = Nothing
+        Try
+            Dim driveLabels As New List(Of String)()
+            For Each driveInfo In selectedDrives
+                driveLabels.Add($"0x{driveInfo.Item1.ElementAddress.ToString("X4")} ({driveInfo.Item2.DevicePath})")
+            Next
+            monitor = New ChangerExtractionMonitorForm(driveLabels)
+            monitor.Show(Me)
+        Catch ex As Exception
+            AppendLog("无法打开提取监控窗口：" & ex.Message)
+        End Try
+
         Dim jobCount As Integer = jobs.Count
         Dim successFiles As Integer = 0
         Dim failedTapes As Integer = 0
@@ -476,7 +488,8 @@ Friend Class ChangerFileManagerForm
                                Dim workerCount As Integer = Math.Min(selectedDrives.Count, queue.Count)
                                Dim workers As New List(Of Task)()
                                For driveIndex As Integer = 0 To workerCount - 1
-                                   Dim driveInfo As Tuple(Of MediumChanger.Element, BlockDevice) = selectedDrives(driveIndex)
+                                   Dim driveIndexSnapshot As Integer = driveIndex
+                                   Dim driveInfo As Tuple(Of MediumChanger.Element, BlockDevice) = selectedDrives(driveIndexSnapshot)
                                    workers.Add(Task.Run(Sub()
                                                             Do
                                                                 Dim job As ExtractionJob = DequeueExtractionJob(queue, queueLock)
@@ -491,8 +504,17 @@ Friend Class ChangerFileManagerForm
                                                                 AppendLogThreadSafe($">>> [{tapeBarcode}] 开始提取 {job.Files.Count} 个文件到：{tapeTarget}（驱动器 {driveText}）")
                                                                 slot.Status = "正在提取文件"
                                                                 UpdateRowThreadSafe(slot)
+                                                                If monitor IsNot Nothing AndAlso Not monitor.IsDisposed Then
+                                                                    monitor.SetCurrentTape(driveIndexSnapshot, tapeBarcode)
+                                                                End If
                                                                 Try
-                                                                    Dim extracted As Integer = _core.ExtractFiles(slot, job.Files, tapeTarget, driveInfo.Item1)
+                                                                    Dim extracted As Integer = _core.ExtractFiles(slot, job.Files, tapeTarget, driveInfo.Item1,
+                                                                        Sub(writtenBytes As Long)
+                                                                            If monitor IsNot Nothing AndAlso Not monitor.IsDisposed Then monitor.ReportBytes(driveIndexSnapshot, writtenBytes)
+                                                                        End Sub,
+                                                                        Sub(handle As IntPtr)
+                                                                            If monitor IsNot Nothing AndAlso Not monitor.IsDisposed Then monitor.AttachHandle(driveIndexSnapshot, handle)
+                                                                        End Sub)
                                                                     Interlocked.Add(successFiles, extracted)
                                                                     slot.Status = $"提取完成：{extracted} 个文件"
                                                                     AppendLogThreadSafe($"[{tapeBarcode}] 提取完成：{extracted} 个文件。")
@@ -500,6 +522,10 @@ Friend Class ChangerFileManagerForm
                                                                     Interlocked.Increment(failedTapes)
                                                                     slot.Status = "提取失败"
                                                                     AppendLogThreadSafe($"[{tapeBarcode}] 提取失败：{ex.Message}")
+                                                                Finally
+                                                                    If monitor IsNot Nothing AndAlso Not monitor.IsDisposed Then
+                                                                        monitor.MarkIdle(driveIndexSnapshot)
+                                                                    End If
                                                                 End Try
                                                                 UpdateRowThreadSafe(slot)
                                                             Loop
@@ -508,6 +534,12 @@ Friend Class ChangerFileManagerForm
                                Task.WaitAll(workers.ToArray())
                            End Sub)
         Finally
+            If monitor IsNot Nothing AndAlso Not monitor.IsDisposed Then
+                Try
+                    monitor.MarkAllIdle()
+                Catch ex As Exception
+                End Try
+            End If
             SetBusy(False)
             UpdateAllRows()
         End Try
@@ -515,6 +547,12 @@ Friend Class ChangerFileManagerForm
         If failedTapes > 0 Then summary &= $"，{failedTapes} 盘失败"
         SetStatus(summary)
         AppendLog(summary & "。")
+        If monitor IsNot Nothing AndAlso Not monitor.IsDisposed Then
+            Try
+                monitor.MarkFinished(summary)
+            Catch ex As Exception
+            End Try
+        End If
     End Function
 
     Private Function SelectTargetFolder() As String
