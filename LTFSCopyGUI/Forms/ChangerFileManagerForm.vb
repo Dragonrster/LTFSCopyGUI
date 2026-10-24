@@ -2,6 +2,7 @@ Imports System
 Imports System.Collections.Generic
 Imports System.Drawing
 Imports System.IO
+Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports LTFSCopyGUI.TapeUtils
@@ -280,7 +281,7 @@ Friend Class ChangerFileManagerForm
         If row Is Nothing OrElse slot Is Nothing Then Return
         If row.DataGridView IsNot Nothing AndAlso row.DataGridView.Columns.Count < 5 Then Return
         row.Cells(0).Value = slot.SlotDisplayText & If(slot.IsImportExport, " 导入/导出", " 存储槽")
-        row.Cells(1).Value = slot.Barcode
+        row.Cells(1).Value = GetEffectiveBarcode(slot)
         Dim schemaPath As String = slot.LocalSchemaPath
         row.Cells(2).Value = If(String.IsNullOrWhiteSpace(schemaPath), "无", IO.Path.GetFileName(schemaPath))
         row.Cells(2).ToolTipText = If(schemaPath, String.Empty)
@@ -443,31 +444,71 @@ Friend Class ChangerFileManagerForm
         Dim targetRoot As String = SelectTargetFolder()
         If String.IsNullOrWhiteSpace(targetRoot) Then Return
 
-        SetBusy(True, "正在提取文件...")
+        SetBusy(True, "正在检查可用驱动器...")
+        Dim mappedDrives As List(Of Tuple(Of MediumChanger.Element, BlockDevice)) = Nothing
+        Try
+            mappedDrives = Await Task.Run(Function() _core.GetMappedDriveList())
+        Finally
+            SetBusy(False)
+        End Try
+        If mappedDrives Is Nothing OrElse mappedDrives.Count = 0 Then
+            AppendLog("没有可用的磁带驱动器（或无法映射到本机磁带设备），无法提取。")
+            SetStatus("没有可用的磁带驱动器")
+            Return
+        End If
+
+        Dim selectedDrives As List(Of Tuple(Of MediumChanger.Element, BlockDevice)) = mappedDrives
+        If jobs.Count > 1 AndAlso mappedDrives.Count > 1 Then
+            selectedDrives = SelectExtractionDrives(mappedDrives)
+            If selectedDrives Is Nothing OrElse selectedDrives.Count = 0 Then
+                AppendLog("已取消提取（未选择驱动器）。")
+                SetStatus("就绪")
+                Return
+            End If
+        End If
+
+        Dim jobCount As Integer = jobs.Count
         Dim successFiles As Integer = 0
         Dim failedTapes As Integer = 0
+        SetBusy(True, "正在提取文件...")
         Try
-            For Each job In jobs
-                Dim slot As ChangerFileManagerCore.TapeSlot = job.Slot
-                Dim tapeTarget As String = targetRoot
-                If jobs.Count > 1 Then
-                    tapeTarget = IO.Path.Combine(targetRoot, SanitizeFolderName(slot.Barcode))
-                End If
-                AppendLog($">>> [{slot.Barcode}] 开始提取 {job.Files.Count} 个文件到：{tapeTarget}")
-                slot.Status = "正在提取文件"
-                UpdateRow(slot)
-                Try
-                    Dim extracted As Integer = Await Task.Run(Function() _core.ExtractFiles(slot, job.Files, tapeTarget))
-                    successFiles += extracted
-                    slot.Status = $"提取完成：{extracted} 个文件"
-                    AppendLog($"[{slot.Barcode}] 提取完成：{extracted} 个文件。")
-                Catch ex As Exception
-                    failedTapes += 1
-                    slot.Status = "提取失败"
-                    AppendLog($"[{slot.Barcode}] 提取失败：{ex.Message}")
-                End Try
-                UpdateRow(slot)
-            Next
+            Await Task.Run(Sub()
+                               Dim queue As New List(Of ExtractionJob)(jobs)
+                               Dim queueLock As New Object()
+                               Dim workerCount As Integer = Math.Min(selectedDrives.Count, queue.Count)
+                               Dim workers As New List(Of Task)()
+                               For driveIndex As Integer = 0 To workerCount - 1
+                                   Dim driveInfo As Tuple(Of MediumChanger.Element, BlockDevice) = selectedDrives(driveIndex)
+                                   workers.Add(Task.Run(Sub()
+                                                            Do
+                                                                Dim job As ExtractionJob = DequeueExtractionJob(queue, queueLock)
+                                                                If job Is Nothing Then Exit Do
+                                                                Dim slot As ChangerFileManagerCore.TapeSlot = job.Slot
+                                                                Dim tapeBarcode As String = GetEffectiveBarcode(slot)
+                                                                Dim tapeTarget As String = targetRoot
+                                                                If jobCount > 1 Then
+                                                                    tapeTarget = IO.Path.Combine(targetRoot, SanitizeFolderName(tapeBarcode))
+                                                                End If
+                                                                Dim driveText As String = $"0x{driveInfo.Item1.ElementAddress.ToString("X4")} ({driveInfo.Item2.DevicePath})"
+                                                                AppendLogThreadSafe($">>> [{tapeBarcode}] 开始提取 {job.Files.Count} 个文件到：{tapeTarget}（驱动器 {driveText}）")
+                                                                slot.Status = "正在提取文件"
+                                                                UpdateRowThreadSafe(slot)
+                                                                Try
+                                                                    Dim extracted As Integer = _core.ExtractFiles(slot, job.Files, tapeTarget, driveInfo.Item1)
+                                                                    Interlocked.Add(successFiles, extracted)
+                                                                    slot.Status = $"提取完成：{extracted} 个文件"
+                                                                    AppendLogThreadSafe($"[{tapeBarcode}] 提取完成：{extracted} 个文件。")
+                                                                Catch ex As Exception
+                                                                    Interlocked.Increment(failedTapes)
+                                                                    slot.Status = "提取失败"
+                                                                    AppendLogThreadSafe($"[{tapeBarcode}] 提取失败：{ex.Message}")
+                                                                End Try
+                                                                UpdateRowThreadSafe(slot)
+                                                            Loop
+                                                        End Sub))
+                               Next
+                               Task.WaitAll(workers.ToArray())
+                           End Sub)
         Finally
             SetBusy(False)
             UpdateAllRows()
@@ -507,6 +548,41 @@ Friend Class ChangerFileManagerForm
 
 #Region "UI 辅助"
 
+    Private Shared Function GetEffectiveBarcode(slot As ChangerFileManagerCore.TapeSlot) As String
+        If slot Is Nothing Then Return "Unknown"
+        If Not String.IsNullOrWhiteSpace(slot.ResolvedBarcode) Then Return slot.ResolvedBarcode
+        If Not String.IsNullOrWhiteSpace(slot.Barcode) Then Return slot.Barcode
+        Return "Unknown"
+    End Function
+
+    Private Shared Function DequeueExtractionJob(jobs As List(Of ExtractionJob), queueLock As Object) As ExtractionJob
+        SyncLock queueLock
+            If jobs.Count = 0 Then Return Nothing
+            Dim job As ExtractionJob = jobs(0)
+            jobs.RemoveAt(0)
+            Return job
+        End SyncLock
+    End Function
+
+    Private Function SelectExtractionDrives(mappedDrives As List(Of Tuple(Of MediumChanger.Element, BlockDevice))) As List(Of Tuple(Of MediumChanger.Element, BlockDevice))
+        Using dialog As New ChangerDriveSelectorForm(mappedDrives, "选择参与提取的驱动器", "选择参与本次提取的驱动器（至少一个；选中的驱动器会并行提取）：", "确定", "取消")
+            If dialog.ShowDialog(Me) = DialogResult.OK Then Return dialog.SelectedDrives
+        End Using
+        Return Nothing
+    End Function
+
+    Private Sub UpdateRowThreadSafe(slot As ChangerFileManagerCore.TapeSlot)
+        If slot Is Nothing OrElse Me.IsDisposed Then Return
+        If Me.InvokeRequired Then
+            Try
+                Me.BeginInvoke(New Action(Of ChangerFileManagerCore.TapeSlot)(AddressOf UpdateRowThreadSafe), slot)
+            Catch ex As Exception
+                Return
+            End Try
+            Return
+        End If
+        UpdateRow(slot)
+    End Sub
     Private Function FindSlotByBarcode(barcode As String) As ChangerFileManagerCore.TapeSlot
         For Each slot In _slots
             If String.Equals(slot.Barcode, barcode, StringComparison.OrdinalIgnoreCase) Then Return slot

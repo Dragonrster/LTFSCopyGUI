@@ -42,6 +42,9 @@ Friend NotInheritable Class ChangerFileManagerCore
             End Get
         End Property
 
+        ''' <summary>从磁带标签/卷内解析出的完整条码（可能含代数后缀）；尚未读取时为 Nothing。</summary>
+        Friend Property ResolvedBarcode As String
+
         Friend ReadOnly Property SlotDisplayText As String
             Get
                 Return $"0x{SlotAddress.ToString("X4")}"
@@ -309,6 +312,26 @@ Friend NotInheritable Class ChangerFileManagerCore
         Return False
     End Function
 
+    ''' <summary>返回当前可用（空闲且能映射到本机磁带设备）的驱动器列表，用于多驱动器并行提取。</summary>
+    Friend Function GetMappedDriveList() As List(Of Tuple(Of MediumChanger.Element, BlockDevice))
+        Dim result As New List(Of Tuple(Of MediumChanger.Element, BlockDevice))()
+        EnsureChanger()
+        RefreshChangerElements()
+        If _changer.Elements Is Nothing Then Return result
+        Dim usedDevicePaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        For Each element In _changer.Elements
+            If element Is Nothing Then Continue For
+            If element.ElementTypeCode <> MediumChanger.Element.ElementTypeCodes.DataTransferElement Then Continue For
+            If element.Full Then Continue For
+            Dim device As BlockDevice = Nothing
+            If Not TryMapDriveElement(element, device) Then Continue For
+            If usedDevicePaths.Add(device.DevicePath) Then
+                result.Add(New Tuple(Of MediumChanger.Element, BlockDevice)(element, device))
+            End If
+        Next
+        Return result
+    End Function
+
     Private Function FindAvailableDriveElement() As MediumChanger.Element
         RefreshChangerElements()
         If _changer.Elements Is Nothing Then Return Nothing
@@ -331,14 +354,57 @@ Friend NotInheritable Class ChangerFileManagerCore
         If String.IsNullOrWhiteSpace(barcode) Then Return Nothing
         Dim schemaRoot As String = My.Settings.schemaPath
         If String.IsNullOrWhiteSpace(schemaRoot) Then Return Nothing
-        Dim barcodeDir As String = Path.Combine(schemaRoot, SafeDirectoryName(barcode))
-        If Not Directory.Exists(barcodeDir) Then Return Nothing
-        Dim info As New DirectoryInfo(barcodeDir)
-        Dim newest As FileInfo = FindNewestFile(info, "*.schema")
-        If newest IsNot Nothing Then Return newest.FullName
-        newest = FindNewestFile(info, "*.schema.zst")
-        If newest IsNot Nothing Then Return newest.FullName
-        Return Nothing
+        Dim safeBarcode As String = SafeDirectoryName(barcode)
+        If String.IsNullOrWhiteSpace(safeBarcode) Then Return Nothing
+        Dim barcodeDir As String = Path.Combine(schemaRoot, safeBarcode)
+        If Directory.Exists(barcodeDir) Then
+            Dim found As String = FindNewestSchemaInDirectory(New DirectoryInfo(barcodeDir))
+            If Not String.IsNullOrWhiteSpace(found) Then Return found
+        End If
+        Return FindNewestLocalSchemaByPrefix(schemaRoot, safeBarcode)
+    End Function
+
+    ''' <summary>在指定目录中查找最新的 .schema 或 .schema.zst。</summary>
+    Private Shared Function FindNewestSchemaInDirectory(directory As DirectoryInfo) As String
+        If directory Is Nothing OrElse Not directory.Exists Then Return Nothing
+        Dim newest As FileInfo = FindNewestFile(directory, "*.schema")
+        If newest Is Nothing Then newest = FindNewestFile(directory, "*.schema.zst")
+        If newest Is Nothing Then Return Nothing
+        Return newest.FullName
+    End Function
+
+    ''' <summary>按条码前缀匹配 schema 目录（处理带库 PVTI 缺少代数后缀的情况）。</summary>
+    Private Shared Function FindNewestLocalSchemaByPrefix(schemaRoot As String, safeBarcode As String) As String
+        Try
+            Dim root As New DirectoryInfo(schemaRoot)
+            If Not root.Exists OrElse String.IsNullOrWhiteSpace(safeBarcode) Then Return Nothing
+            Dim newest As FileInfo = Nothing
+            For Each folder As DirectoryInfo In root.GetDirectories(safeBarcode & "*", SearchOption.TopDirectoryOnly)
+                Dim found As FileInfo = FindNewestFile(folder, "*.schema")
+                If found Is Nothing Then found = FindNewestFile(folder, "*.schema.zst")
+                If found Is Nothing Then Continue For
+                If newest Is Nothing OrElse found.LastWriteTimeUtc > newest.LastWriteTimeUtc Then newest = found
+            Next
+            Return If(newest Is Nothing, Nothing, newest.FullName)
+        Catch ex As Exception
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>从 schemaPath\&lt;条码&gt;[\\Load]\\file 路径反推条码目录名。</summary>
+    Private Shared Function TryGetSchemaFolderBarcode(schemaFilePath As String) As String
+        Try
+            If String.IsNullOrWhiteSpace(schemaFilePath) Then Return Nothing
+            Dim directoryPath As String = Path.GetDirectoryName(schemaFilePath)
+            If String.IsNullOrWhiteSpace(directoryPath) Then Return Nothing
+            If String.Equals(Path.GetFileName(directoryPath), "Load", StringComparison.OrdinalIgnoreCase) Then
+                directoryPath = Path.GetDirectoryName(directoryPath)
+            End If
+            If String.IsNullOrWhiteSpace(directoryPath) Then Return Nothing
+            Return Path.GetFileName(directoryPath)
+        Catch ex As Exception
+            Return Nothing
+        End Try
     End Function
 
     Private Shared Function FindNewestFile(directory As DirectoryInfo, pattern As String) As FileInfo
@@ -396,6 +462,10 @@ Friend NotInheritable Class ChangerFileManagerCore
             End If
             slot.FileCount = CountFiles(index)
             slot.Status = "本地索引已加载"
+            If String.IsNullOrWhiteSpace(slot.ResolvedBarcode) Then
+                Dim resolvedBarcode As String = TryGetSchemaFolderBarcode(slot.LocalSchemaPath)
+                If Not String.IsNullOrWhiteSpace(resolvedBarcode) Then slot.ResolvedBarcode = resolvedBarcode
+            End If
         Catch ex As Exception
             slot.Status = "本地索引解析失败"
             LogMessage($"[{slot.Barcode}] 解析本地索引失败：{ex.Message}")
@@ -523,6 +593,7 @@ Friend NotInheritable Class ChangerFileManagerCore
             End If
             Dim barcodeOnTape As String = TapeUtils.ReadBarcode(mount.Handle)
             Dim finalBarcode As String = If(String.IsNullOrWhiteSpace(barcodeOnTape), slot.Barcode, barcodeOnTape.Trim())
+            slot.ResolvedBarcode = finalBarcode
             Dim savedPath As String = SaveIndexCopy(finalBarcode, index, tempPath)
             If String.IsNullOrWhiteSpace(savedPath) AndAlso File.Exists(tempPath) Then
                 Try
@@ -657,13 +728,13 @@ Friend NotInheritable Class ChangerFileManagerCore
 #Region "文件提取"
 
     ''' <summary>把一个索引中被勾选的文件提取到目标文件夹。磁带会自动装载并归位。</summary>
-    Friend Function ExtractFiles(slot As TapeSlot, items As List(Of SelectedFile), targetRoot As String) As Integer
+    Friend Function ExtractFiles(slot As TapeSlot, items As List(Of SelectedFile), targetRoot As String, Optional driveElement As MediumChanger.Element = Nothing) As Integer
         If slot Is Nothing Then Throw New ArgumentNullException(NameOf(slot))
         EnsureChanger()
         If items Is Nothing OrElse items.Count = 0 Then Return 0
         If String.IsNullOrWhiteSpace(targetRoot) Then Throw New ArgumentException("提取目标文件夹为空。", NameOf(targetRoot))
         Directory.CreateDirectory(targetRoot)
-        Using mount As MountedTape = MountTape(slot)
+        Using mount As MountedTape = MountTape(slot, driveElement)
             Dim layout As TapeLayout = ReadTapeLayout(mount.Handle)
             Dim plan As ExtractionPlan = BuildExtractionPlan(items, layout)
             Dim extractedFiles As Integer = 0
@@ -916,8 +987,14 @@ Friend NotInheritable Class ChangerFileManagerCore
 
     ''' <summary>把磁带从槽位移到空闲驱动器并打开句柄；调用方用 Using 保证磁带归位。</summary>
     Private Function MountTape(slot As TapeSlot) As MountedTape
+        Return MountTape(slot, Nothing)
+    End Function
+
+    ''' <summary>把磁带移到指定驱动器（Nothing 表示任选空闲驱动器）并打开句柄；调用方用 Using 保证磁带归位。</summary>
+    Private Function MountTape(slot As TapeSlot, driveElement As MediumChanger.Element) As MountedTape
         EnsureChanger()
-        Dim driveElement As MediumChanger.Element = FindAvailableDriveElement()
+        If slot Is Nothing Then Throw New ArgumentNullException(NameOf(slot))
+        If driveElement Is Nothing Then driveElement = FindAvailableDriveElement()
         If driveElement Is Nothing Then
             Throw New InvalidOperationException("带库中没有可用的空闲磁带驱动器（或无法映射到本机磁带设备）。")
         End If
@@ -952,15 +1029,26 @@ Friend NotInheritable Class ChangerFileManagerCore
         End Try
     End Function
 
-    Private Shared Sub WaitTapeReady(handle As IntPtr)
+    Private ReadOnly TapeReadyTimeoutSeconds As Integer = 240
+
+    ''' <summary>等待驱动器完成介质装载并进入就绪状态。带库自动装载一盘 LTO 磁带通常需要几十秒到数分钟，
+    ''' 不能只等几秒，否则会立刻收到 NOT READY / SI_ERR_LOADING_MEDIA。</summary>
+    Private Sub WaitTapeReady(handle As IntPtr)
+        Dim started As DateTime = DateTime.UtcNow
         Dim lastSense As Byte() = Nothing
-        For attempt As Integer = 1 To 20
+        Dim lastLoggedSecond As Integer = -15
+        While (DateTime.UtcNow - started).TotalSeconds < TapeReadyTimeoutSeconds
             lastSense = TapeUtils.TestUnitReady(handle)
             If lastSense IsNot Nothing AndAlso lastSense.Length >= 3 AndAlso lastSense(2) = 0 Then Return
+            Dim elapsed As Integer = CInt((DateTime.UtcNow - started).TotalSeconds)
+            If elapsed - lastLoggedSecond >= 15 Then
+                lastLoggedSecond = elapsed
+                LogMessage($"等待磁带驱动器就绪（已等待 {elapsed} 秒）：{TapeUtils.ParseSenseData(lastSense)}")
+            End If
             Thread.Sleep(500)
-        Next
+        End While
         Dim senseText As String = If(lastSense Is Nothing OrElse lastSense.Length = 0, "未知错误", TapeUtils.ParseSenseData(lastSense))
-        Throw New IOException($"磁带驱动器未就绪：{senseText}")
+        Throw New IOException($"磁带驱动器未就绪（等待 {TapeReadyTimeoutSeconds} 秒超时）：{senseText}")
     End Sub
 
     Private Sub ApplyEncryptionKey(handle As IntPtr)

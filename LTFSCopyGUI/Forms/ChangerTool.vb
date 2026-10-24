@@ -739,6 +739,28 @@ Public Class ChangerTool
         Return IO.Directory.GetFiles(directory, "*.cm").Length > 0
     End Function
 
+    ''' <summary>判断两处条码是否指同一盘磁带（带库 PVTI 可能缺少代数后缀，如 DR0001 与卷内条码 DR0001L5）。</summary>
+    Private Shared Function BarcodesMatch(left As String, right As String) As Boolean
+        If String.IsNullOrWhiteSpace(left) OrElse String.IsNullOrWhiteSpace(right) Then Return False
+        Dim a As String = left.Trim()
+        Dim b As String = right.Trim()
+        If String.Equals(a, b, StringComparison.OrdinalIgnoreCase) Then Return True
+        Return a.StartsWith(b, StringComparison.OrdinalIgnoreCase) OrElse b.StartsWith(a, StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    ''' <summary>本地是否已有该磁带的 CM：精确条码目录或同前缀（含代数后缀）目录下存在 *.cm。</summary>
+    Private Shared Function LocalCMExistsForTape(barcode As String) As Boolean
+        If String.IsNullOrWhiteSpace(barcode) Then Return False
+        If LocalCMExists(barcode) Then Return True
+        Dim schemaRoot As String = My.Settings.schemaPath
+        If String.IsNullOrWhiteSpace(schemaRoot) OrElse Not IO.Directory.Exists(schemaRoot) Then Return False
+        Dim safeBarcode As String = GetSafeDirectoryName(barcode)
+        If String.IsNullOrWhiteSpace(safeBarcode) Then Return False
+        For Each directory As String In IO.Directory.GetDirectories(schemaRoot, safeBarcode & "*", IO.SearchOption.TopDirectoryOnly)
+            If IO.Directory.GetFiles(directory, "*.cm").Length > 0 Then Return True
+        Next
+        Return False
+    End Function
     Private Shared Function SaveLocalCMReport(barcode As String, report As String) As String
         Dim directory As String = GetLocalCMDirectory(barcode)
         If directory Is Nothing Then Return Nothing
@@ -1225,7 +1247,7 @@ Public Class ChangerTool
                                              Dim tapeBarcode As String = tape.PrimaryVolumeTagInformation
                                              If String.IsNullOrWhiteSpace(tapeBarcode) Then Continue For
                                              tapeBarcode = tapeBarcode.Trim()
-                                             If LocalCMExists(tapeBarcode) Then Continue For
+                                             If LocalCMExistsForTape(tapeBarcode) Then Continue For
                                              targetTapes.Add(tape)
                                          Next
                                          If targetTapes.Count = 0 Then
@@ -1278,14 +1300,15 @@ Public Class ChangerTool
                                                                                   If cmData IsNot Nothing AndAlso cmData.ApplicationSpecificData IsNot Nothing Then cmBarcode = cmData.ApplicationSpecificData.Barcode
                                                                                   If Not String.IsNullOrWhiteSpace(cmBarcode) Then
                                                                                       cmBarcode = cmBarcode.Trim()
-                                                                                      If Not String.Equals(cmBarcode, tapeBarcode, StringComparison.OrdinalIgnoreCase) Then
+                                                                                      If Not BarcodesMatch(cmBarcode, tapeBarcode) Then
                                                                                           Interlocked.Increment(mismatched)
                                                                                           AppendLog($"  Barcode mismatch: slot={tapeBarcode} CM={cmBarcode}")
                                                                                       End If
                                                                                   Else
                                                                                       AppendLog($"  CM barcode unavailable: {tapeBarcode}")
                                                                                   End If
-                                                                                  Dim savedPath As String = SaveLocalCMReport(tapeBarcode, report)
+                                                                                  Dim canonicalBarcode As String = If(String.IsNullOrWhiteSpace(cmBarcode), tapeBarcode, cmBarcode.Trim())
+                                                                                  Dim savedPath As String = SaveLocalCMReport(canonicalBarcode, report)
                                                                                   Interlocked.Increment(succeeded)
                                                                                   AppendLog($"  Saved CM: {savedPath}")
                                                                               Catch ex As Exception
