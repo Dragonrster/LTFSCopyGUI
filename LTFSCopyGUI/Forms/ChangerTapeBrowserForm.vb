@@ -33,8 +33,8 @@ Public Class ChangerTapeBrowserForm
 
     Private _menuStrip As MenuStrip
     Private _split As SplitContainer
-    Private _tree As TreeView
-    Private _list As ListView
+    Private _tree As DpiAwareTreeView
+    Private _list As DpiAwareListView
     Private _pathLabel As Label
     Private _statusLabel As ToolStripStatusLabel
     Private _selectionLabel As ToolStripStatusLabel
@@ -170,7 +170,7 @@ Public Class ChangerTapeBrowserForm
         split.BringToFront()
         _split = split
 
-        _tree = New TreeView()
+        _tree = New DpiAwareTreeView()
         _tree.Dock = DockStyle.Fill
         _tree.HideSelection = False
         _tree.FullRowSelect = True
@@ -179,7 +179,8 @@ Public Class ChangerTapeBrowserForm
         AddHandler _tree.AfterSelect, AddressOf TreeAfterSelect
         split.Panel1.Controls.Add(_tree)
 
-        _list = New ListView()
+        _list = New DpiAwareListView()
+        _list.VirtualMode = False
         _list.Dock = DockStyle.Fill
         _list.View = View.Details
         _list.CheckBoxes = True
@@ -200,11 +201,14 @@ Public Class ChangerTapeBrowserForm
         AddHandler _list.ItemCheck, AddressOf ListItemCheck
         AddHandler _list.ItemChecked, AddressOf ListItemChecked
         AddHandler _list.MouseDoubleClick, AddressOf ListMouseDoubleClick
+        AddHandler _list.MouseUp, AddressOf ListMouseUp
+        AddHandler _list.KeyDown, AddressOf ListKeyDown
         split.Panel2.Controls.Add(_list)
         split.SplitterWidth = 6
 
         AddHandler KeyDown, AddressOf FormKeyDown
         AddHandler Load, AddressOf FormLoad
+        DisplayHelper.ApplyApplicationFont(Me)
     End Sub
 
     Private Sub FormLoad(sender As Object, e As EventArgs)
@@ -458,6 +462,37 @@ Public Class ChangerTapeBrowserForm
         Else
             _checkedFiles.Remove(childFile)
         End If
+        UpdateStatus()
+    End Sub
+
+    ''' <summary>框选（拖拽多选）后自动勾选选中的文件，行为与主程序文件列表一致。</summary>
+    Private Sub ListMouseUp(sender As Object, e As MouseEventArgs)
+        If e.Button <> MouseButtons.Left Then Return
+        If _list.SelectedItems.Count > 1 Then CheckSelectedItems()
+    End Sub
+
+    Private Sub ListKeyDown(sender As Object, e As KeyEventArgs)
+        If e.Control AndAlso e.KeyCode = Keys.A Then
+            ' 交给 ListView 先全选，再同步勾选状态。
+            _list.BeginInvoke(New Action(AddressOf CheckSelectedItems))
+        End If
+    End Sub
+
+    Private Sub CheckSelectedItems()
+        If _list.SelectedItems.Count = 0 Then Return
+        _suppressCheckEvents = True
+        Try
+            For Each item As ListViewItem In _list.SelectedItems
+                Dim entry As BrowserEntry = TryCast(item.Tag, BrowserEntry)
+                If entry Is Nothing OrElse entry.IsDirectory Then Continue For
+                Dim childFile As ltfsindex.file = TryCast(entry.Item, ltfsindex.file)
+                If childFile Is Nothing Then Continue For
+                item.Checked = True
+                _checkedFiles(childFile) = entry.RelativePath
+            Next
+        Finally
+            _suppressCheckEvents = False
+        End Try
         UpdateStatus()
     End Sub
 
