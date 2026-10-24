@@ -408,9 +408,14 @@ Public Class ChangerTapeBrowserForm
                 item.SubItems.Add(If(entry.IsDirectory, String.Empty, If(entry.ReadOnlyFlag, "True", "False")))
                 item.SubItems.Add(If(entry.IsDirectory, String.Empty, If(entry.OpenForWriteFlag, "True", "False")))
                 item.SubItems.Add(If(entry.IsDirectory, String.Empty, entry.FileUid.ToString()))
-                Dim childFile As ltfsindex.file = If(entry.IsDirectory, Nothing, TryCast(entry.Item, ltfsindex.file))
-                If childFile IsNot Nothing AndAlso _checkedFiles.ContainsKey(childFile) Then
-                    item.Checked = True
+                Dim childFile As ltfsindex.file = Nothing
+                If entry.IsDirectory Then
+                    If AreDirectoryFilesChecked(entry) Then item.Checked = True
+                Else
+                    childFile = TryCast(entry.Item, ltfsindex.file)
+                    If childFile IsNot Nothing AndAlso _checkedFiles.ContainsKey(childFile) Then
+                        item.Checked = True
+                    End If
                 End If
                 item.ToolTipText = entry.RelativePath
                 _list.Items.Add(item)
@@ -443,18 +448,80 @@ Public Class ChangerTapeBrowserForm
         End If
     End Sub
 
+    ''' <summary>递归遍历目录下的所有文件（目录：当前目录下的子目录；文件：按 LTFS 相对路径）。</summary>
+    Private Function EnumerateDirectoryFiles(directory As ltfsindex.directory, relativePath As String,
+                                            action As Action(Of ltfsindex.file, String)) As Integer
+        If directory Is Nothing OrElse action Is Nothing Then Return 0
+        Dim count As Integer = 0
+        Dim directoryCount As Integer = 0
+        Try
+            directoryCount = directory.GetLazyDirectDirectoryCount()
+        Catch
+            directoryCount = 0
+        End Try
+        For index As Integer = 0 To directoryCount - 1
+            Dim childDirectory As ltfsindex.directory = directory.GetLazyDirectoryAt(index)
+            If childDirectory Is Nothing Then Continue For
+            count += EnumerateDirectoryFiles(childDirectory, JoinPath(relativePath, childDirectory.name), action)
+        Next
+        Dim fileCount As Integer = 0
+        Try
+            fileCount = directory.GetLazyDirectFileCount()
+        Catch
+            fileCount = 0
+        End Try
+        For index As Integer = 0 To fileCount - 1
+            Dim childFile As ltfsindex.file = directory.GetLazyFileAt(index)
+            If childFile Is Nothing Then Continue For
+            action(childFile, JoinPath(relativePath, childFile.name))
+            count += 1
+        Next
+        Return count
+    End Function
+
+    ''' <summary>勾选/取消勾选整个目录（递归包含全部子文件），与主程序选择目录的语义一致。</summary>
+    Private Sub SetDirectoryChecked(entry As BrowserEntry, checked As Boolean)
+        If entry Is Nothing OrElse Not entry.IsDirectory Then Return
+        Dim childDirectory As ltfsindex.directory = TryCast(entry.Item, ltfsindex.directory)
+        If childDirectory Is Nothing Then Return
+        EnumerateDirectoryFiles(childDirectory, entry.RelativePath,
+                                Sub(childFile As ltfsindex.file, childPath As String)
+                                    If checked Then
+                                        _checkedFiles(childFile) = childPath
+                                    Else
+                                        _checkedFiles.Remove(childFile)
+                                    End If
+                                End Sub)
+    End Sub
+
+    ''' <summary>目录内的文件是否已全部勾选（用于列表刷新时显示目录勾选状态）。</summary>
+    Private Function AreDirectoryFilesChecked(entry As BrowserEntry) As Boolean
+        If entry Is Nothing OrElse Not entry.IsDirectory Then Return False
+        Dim childDirectory As ltfsindex.directory = TryCast(entry.Item, ltfsindex.directory)
+        If childDirectory Is Nothing Then Return False
+        Dim total As Integer = 0
+        Dim selectedCount As Integer = 0
+        EnumerateDirectoryFiles(childDirectory, entry.RelativePath,
+                                Sub(childFile As ltfsindex.file, childPath As String)
+                                    total += 1
+                                    If _checkedFiles.ContainsKey(childFile) Then selectedCount += 1
+                                End Sub)
+        Return total > 0 AndAlso selectedCount = total
+    End Function
+
     Private Sub ListItemCheck(sender As Object, e As ItemCheckEventArgs)
         If _suppressCheckEvents Then Return
-        Dim entry As BrowserEntry = TryCast(_list.Items(e.Index).Tag, BrowserEntry)
-        If entry Is Nothing OrElse entry.IsDirectory Then
-            e.NewValue = CheckState.Unchecked
-        End If
     End Sub
 
     Private Sub ListItemChecked(sender As Object, e As ItemCheckedEventArgs)
         If _suppressCheckEvents Then Return
         Dim entry As BrowserEntry = TryCast(e.Item.Tag, BrowserEntry)
-        If entry Is Nothing OrElse entry.IsDirectory Then Return
+        If entry Is Nothing Then Return
+        If entry.IsDirectory Then
+            SetDirectoryChecked(entry, e.Item.Checked)
+            UpdateStatus()
+            Return
+        End If
         Dim childFile As ltfsindex.file = TryCast(entry.Item, ltfsindex.file)
         If childFile Is Nothing Then Return
         If e.Item.Checked Then
@@ -484,7 +551,12 @@ Public Class ChangerTapeBrowserForm
         Try
             For Each item As ListViewItem In _list.SelectedItems
                 Dim entry As BrowserEntry = TryCast(item.Tag, BrowserEntry)
-                If entry Is Nothing OrElse entry.IsDirectory Then Continue For
+                If entry Is Nothing Then Continue For
+                If entry.IsDirectory Then
+                    item.Checked = True
+                    SetDirectoryChecked(entry, True)
+                    Continue For
+                End If
                 Dim childFile As ltfsindex.file = TryCast(entry.Item, ltfsindex.file)
                 If childFile Is Nothing Then Continue For
                 item.Checked = True
@@ -501,10 +573,14 @@ Public Class ChangerTapeBrowserForm
         Try
             For index As Integer = 0 To _list.Items.Count - 1
                 Dim entry As BrowserEntry = TryCast(_list.Items(index).Tag, BrowserEntry)
-                If entry Is Nothing OrElse entry.IsDirectory Then Continue For
+                If entry Is Nothing Then Continue For
+                _list.Items(index).Checked = True
+                If entry.IsDirectory Then
+                    SetDirectoryChecked(entry, True)
+                    Continue For
+                End If
                 Dim childFile As ltfsindex.file = TryCast(entry.Item, ltfsindex.file)
                 If childFile Is Nothing Then Continue For
-                _list.Items(index).Checked = True
                 _checkedFiles(childFile) = entry.RelativePath
             Next
         Finally
