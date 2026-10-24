@@ -429,8 +429,26 @@
   <data name="批量擦除ToolStripMenuItem.Text" xml:space="preserve">
     <value>批量擦除（快速）</value>
   </data>
+  <data name="批量格式化ToolStripMenuItem.Size" type="System.Drawing.Size, System.Drawing">
+    <value>172, 22</value>
+  </data>
+  <data name="批量格式化ToolStripMenuItem.Text" xml:space="preserve">
+    <value>批量格式化</value>
+  </data>
+  <data name="批量读取CMToolStripMenuItem.Size" type="System.Drawing.Size, System.Drawing">
+    <value>172, 22</value>
+  </data>
+  <data name="批量读取CMToolStripMenuItem.Text" xml:space="preserve">
+    <value>批量读取CM</value>
+  </data>
+  <data name="文件管理器ToolStripMenuItem.Size" type="System.Drawing.Size, System.Drawing">
+    <value>172, 22</value>
+  </data>
+  <data name="文件管理器ToolStripMenuItem.Text" xml:space="preserve">
+    <value>文件管理器</value>
+  </data>
   <data name="ContextMenuStrip1.Size" type="System.Drawing.Size, System.Drawing">
-    <value>173, 48</value>
+    <value>173, 114</value>
   </data>
   <data name="&gt;&gt;ContextMenuStrip1.Name" xml:space="preserve">
     <value>ContextMenuStrip1</value>
@@ -748,10 +766,79 @@
   <data name="&gt;&gt;批量擦除ToolStripMenuItem.Type" xml:space="preserve">
     <value>System.Windows.Forms.ToolStripMenuItem, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </data>
+  <data name="&gt;&gt;批量格式化ToolStripMenuItem.Name" xml:space="preserve">
+    <value>批量格式化ToolStripMenuItem</value>
+  </data>
+  <data name="&gt;&gt;批量格式化ToolStripMenuItem.Type" xml:space="preserve">
+    <value>System.Windows.Forms.ToolStripMenuItem, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;批量读取CMToolStripMenuItem.Name" xml:space="preserve">
+    <value>批量读取CMToolStripMenuItem</value>
+  </data>
+  <data name="&gt;&gt;批量读取CMToolStripMenuItem.Type" xml:space="preserve">
+    <value>System.Windows.Forms.ToolStripMenuItem, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="&gt;&gt;文件管理器ToolStripMenuItem.Name" xml:space="preserve">
+    <value>文件管理器ToolStripMenuItem</value>
+  </data>
+  <data name="&gt;&gt;文件管理器ToolStripMenuItem.Type" xml:space="preserve">
+    <value>System.Windows.Forms.ToolStripMenuItem, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
   <data name="&gt;&gt;$this.Name" xml:space="preserve">
     <value>ChangerTool</value>
   </data>
   <data name="&gt;&gt;$this.Type" xml:space="preserve">
     <value>System.Windows.Forms.Form, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </data>
+  <data name="Batch_NoChanger" xml:space="preserve">
+    <value>请先选择并加载带库。</value>
+  </data>
+  <data name="FileManager_Title" xml:space="preserve">
+    <value>文件管理器</value>
+  </data>
+  <data name="Batch_NoDrive" xml:space="preserve">
+    <value>带库中没有可用的磁带驱动器。</value>
+  </data>
+  <data name="Batch_NoTape" xml:space="preserve">
+    <value>带库中没有可操作的满槽磁带。</value>
+  </data>
+  <data name="BatchFormat_Title" xml:space="preserve">
+    <value>批量格式化</value>
+  </data>
+  <data name="BatchFormat_Label" xml:space="preserve">
+    <value>选择要格式化的磁带（Barcode 与 VolumeLabel 将使用磁带现有条码）</value>
+  </data>
+  <data name="BatchFormat_ParamsTitle" xml:space="preserve">
+    <value>格式化参数确认（Barcode/VolumeLabel 自动使用磁带条码）</value>
+  </data>
+  <data name="BatchFormat_Confirm" xml:space="preserve">
+    <value>即将格式化 {0} 盘磁带。格式化会清除磁带上的全部数据，是否继续？</value>
+  </data>
+  <data name="BatchFormat_Finished" xml:space="preserve">
+    <value>批量格式化完成：成功 {0} 盘，失败 {1} 盘。</value>
+  </data>
+  <data name="BatchReadCM_Title" xml:space="preserve">
+    <value>批量读取CM</value>
+  </data>
+  <data name="BatchReadCM_NoTarget" xml:space="preserve">
+    <value>本地已存在全部磁带的 CM，无需读取。</value>
+  </data>
+  <data name="BatchReadCM_Confirm" xml:space="preserve">
+    <value>检测到 {0} 盘磁带本地没有 CM，是否开始读取？</value>
+  </data>
+  <data name="BatchReadCM_Finished" xml:space="preserve">
+    <value>批量读取CM完成：成功 {0} 盘，失败 {1} 盘，Barcode 不一致 {2} 盘。</value>
+  </data>
+  <data name="Dialog_OK" xml:space="preserve">
+    <value>确定</value>
+  </data>
+  <data name="Dialog_Cancel" xml:space="preserve">
+    <value>取消</value>
+  </data>
+  <data name="Batch_SelectDrives_Title" xml:space="preserve">
+    <value>选择参与的驱动器</value>
+  </data>
+  <data name="Batch_SelectDrives_Label" xml:space="preserve">
+    <value>选择要参与本次批量操作的驱动器（至少一个）：</value>
   </data>
 </root>

@@ -145,6 +145,24 @@
   <data name="排序ToolStripMenuItem.Text" xml:space="preserve">
     <value>Sort</value>
   </data>
+  <data name="批量格式化ToolStripMenuItem.Size" type="System.Drawing.Size, System.Drawing">
+    <value>180, 22</value>
+  </data>
+  <data name="批量格式化ToolStripMenuItem.Text" xml:space="preserve">
+    <value>Batch format</value>
+  </data>
+  <data name="批量读取CMToolStripMenuItem.Size" type="System.Drawing.Size, System.Drawing">
+    <value>180, 22</value>
+  </data>
+  <data name="批量读取CMToolStripMenuItem.Text" xml:space="preserve">
+    <value>Batch read CM</value>
+  </data>
+  <data name="文件管理器ToolStripMenuItem.Size" type="System.Drawing.Size, System.Drawing">
+    <value>180, 22</value>
+  </data>
+  <data name="文件管理器ToolStripMenuItem.Text" xml:space="preserve">
+    <value>File manager</value>
+  </data>
   <data name="Button4.Text" xml:space="preserve">
     <value>Automation</value>
   </data>
@@ -409,5 +427,56 @@
         AAAAHwAA+AAAAAAPAAD4AAAAAB8AAPwAAAAAPwAA/geAAOB/AAD/D+AH+P8AAP//8Af//wAA///wD///
         AAD///AP//8AAP//8A///wAA///4D///AAA=
 </value>
+  </data>
+  <data name="Batch_NoChanger" xml:space="preserve">
+    <value>Please select and load a tape library first.</value>
+  </data>
+  <data name="Batch_NoDrive" xml:space="preserve">
+    <value>No available tape drive in the library.</value>
+  </data>
+  <data name="Batch_NoTape" xml:space="preserve">
+    <value>No full slot tape available in the library.</value>
+  </data>
+  <data name="FileManager_Title" xml:space="preserve">
+    <value>File manager</value>
+  </data>
+  <data name="BatchFormat_Title" xml:space="preserve">
+    <value>Batch format</value>
+  </data>
+  <data name="BatchFormat_Label" xml:space="preserve">
+    <value>Select tapes to format (Barcode and VolumeLabel will use the existing tape barcode)</value>
+  </data>
+  <data name="BatchFormat_ParamsTitle" xml:space="preserve">
+    <value>Format parameters (Barcode/VolumeLabel will use each tape's barcode)</value>
+  </data>
+  <data name="BatchFormat_Confirm" xml:space="preserve">
+    <value>About to format {0} tape(s). Formatting will erase all data on the tapes. Continue?</value>
+  </data>
+  <data name="BatchFormat_Finished" xml:space="preserve">
+    <value>Batch format finished: {0} succeeded, {1} failed.</value>
+  </data>
+  <data name="BatchReadCM_Title" xml:space="preserve">
+    <value>Batch read CM</value>
+  </data>
+  <data name="BatchReadCM_NoTarget" xml:space="preserve">
+    <value>CM already exists locally for all tapes.</value>
+  </data>
+  <data name="BatchReadCM_Confirm" xml:space="preserve">
+    <value>Found {0} tape(s) without local CM. Start reading?</value>
+  </data>
+  <data name="BatchReadCM_Finished" xml:space="preserve">
+    <value>Batch CM read finished: {0} succeeded, {1} failed, {2} barcode mismatch(es).</value>
+  </data>
+  <data name="Dialog_OK" xml:space="preserve">
+    <value>OK</value>
+  </data>
+  <data name="Dialog_Cancel" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="Batch_SelectDrives_Title" xml:space="preserve">
+    <value>Select drives</value>
+  </data>
+  <data name="Batch_SelectDrives_Label" xml:space="preserve">
+    <value>Select the drives to use for this batch operation (at least one):</value>
   </data>
 </root>

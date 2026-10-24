@@ -38,6 +38,9 @@ Partial Class ChangerTool
         Me.ContextMenuStrip1 = New System.Windows.Forms.ContextMenuStrip(Me.components)
         Me.排序ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.批量擦除ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
+        Me.批量格式化ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
+        Me.批量读取CMToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
+        Me.文件管理器ToolStripMenuItem = New System.Windows.Forms.ToolStripMenuItem()
         Me.ContextMenuStrip1.SuspendLayout()
         Me.SuspendLayout()
         '
@@ -114,7 +117,7 @@ Partial Class ChangerTool
         '
         'ContextMenuStrip1
         '
-        Me.ContextMenuStrip1.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.排序ToolStripMenuItem, Me.批量擦除ToolStripMenuItem})
+        Me.ContextMenuStrip1.Items.AddRange(New System.Windows.Forms.ToolStripItem() {Me.排序ToolStripMenuItem, Me.批量擦除ToolStripMenuItem, Me.批量格式化ToolStripMenuItem, Me.批量读取CMToolStripMenuItem, Me.文件管理器ToolStripMenuItem})
         Me.ContextMenuStrip1.Name = "ContextMenuStrip1"
         resources.ApplyResources(Me.ContextMenuStrip1, "ContextMenuStrip1")
         '
@@ -127,6 +130,21 @@ Partial Class ChangerTool
         '
         Me.批量擦除ToolStripMenuItem.Name = "批量擦除ToolStripMenuItem"
         resources.ApplyResources(Me.批量擦除ToolStripMenuItem, "批量擦除ToolStripMenuItem")
+        '
+        '批量格式化ToolStripMenuItem
+        '
+        Me.批量格式化ToolStripMenuItem.Name = "批量格式化ToolStripMenuItem"
+        resources.ApplyResources(Me.批量格式化ToolStripMenuItem, "批量格式化ToolStripMenuItem")
+        '
+        '批量读取CMToolStripMenuItem
+        '
+        Me.批量读取CMToolStripMenuItem.Name = "批量读取CMToolStripMenuItem"
+        resources.ApplyResources(Me.批量读取CMToolStripMenuItem, "批量读取CMToolStripMenuItem")
+        '
+        '文件管理器ToolStripMenuItem
+        '
+        Me.文件管理器ToolStripMenuItem.Name = "文件管理器ToolStripMenuItem"
+        resources.ApplyResources(Me.文件管理器ToolStripMenuItem, "文件管理器ToolStripMenuItem")
         '
         'ChangerTool
         '
@@ -174,4 +192,7 @@ Partial Class ChangerTool
     Friend WithEvents ContextMenuStrip1 As ContextMenuStrip
     Friend WithEvents 排序ToolStripMenuItem As ToolStripMenuItem
     Friend WithEvents 批量擦除ToolStripMenuItem As ToolStripMenuItem
+    Friend WithEvents 批量格式化ToolStripMenuItem As ToolStripMenuItem
+    Friend WithEvents 批量读取CMToolStripMenuItem As ToolStripMenuItem
+    Friend WithEvents 文件管理器ToolStripMenuItem As ToolStripMenuItem
 End Class

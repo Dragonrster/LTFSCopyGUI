@@ -706,7 +706,760 @@ Public Class ChangerTool
 
     End Sub
 
+    Private Shared Function GetLocalizedString(key As String) As String
+        Dim resourceManager As New ComponentResourceManager(GetType(ChangerTool))
+        Dim value As String = resourceManager.GetString(key)
+        If String.IsNullOrEmpty(value) Then Return key
+        Return value
+    End Function
+
+    Private Shared Function GetSafeDirectoryName(name As String) As String
+        If String.IsNullOrWhiteSpace(name) Then Return "_"
+        Dim invalidChars As Char() = IO.Path.GetInvalidFileNameChars()
+        Dim builder As New StringBuilder()
+        For Each c As Char In name.Trim()
+            If Array.IndexOf(invalidChars, c) >= 0 Then
+                builder.Append("_"c)
+            Else
+                builder.Append(c)
+            End If
+        Next
+        Return builder.ToString()
+    End Function
+
+    Private Shared Function GetLocalCMDirectory(barcode As String) As String
+        If String.IsNullOrWhiteSpace(My.Settings.schemaPath) Then Return Nothing
+        Return IO.Path.Combine(My.Settings.schemaPath, GetSafeDirectoryName(barcode))
+    End Function
+
+    Private Shared Function LocalCMExists(barcode As String) As Boolean
+        If String.IsNullOrWhiteSpace(barcode) Then Return False
+        Dim directory As String = GetLocalCMDirectory(barcode)
+        If directory Is Nothing OrElse Not IO.Directory.Exists(directory) Then Return False
+        Return IO.Directory.GetFiles(directory, "*.cm").Length > 0
+    End Function
+
+    Private Shared Function SaveLocalCMReport(barcode As String, report As String) As String
+        Dim directory As String = GetLocalCMDirectory(barcode)
+        If directory Is Nothing Then Return Nothing
+        IO.Directory.CreateDirectory(directory)
+        Dim path As String = IO.Path.Combine(directory, $"CM_{Now.ToString("yyyyMMdd_HHmmss")}.cm")
+        IO.File.WriteAllText(path, report, New UTF8Encoding(False))
+        Return path
+    End Function
+
+    Private Function GetStoredTapeElements() As List(Of MediumChanger.Element)
+        Dim tapes As New List(Of MediumChanger.Element)
+        If FullElement Is Nothing Then Return tapes
+        For Each element As MediumChanger.Element In FullElement
+            If Not element.Full Then Continue For
+            If element.ElementTypeCode = MediumChanger.Element.ElementTypeCodes.StorageElement OrElse
+               element.ElementTypeCode = MediumChanger.Element.ElementTypeCodes.ImportExportElement Then
+                tapes.Add(element)
+            End If
+        Next
+        Return tapes
+    End Function
+
+    Private Function GetAvailableTapeDrives() As List(Of MediumChanger.Element)
+        Dim drives As New List(Of MediumChanger.Element)
+        If EmptyElement Is Nothing Then Return drives
+        For Each element As MediumChanger.Element In EmptyElement
+            If element.ElementTypeCode = MediumChanger.Element.ElementTypeCodes.DataTransferElement Then
+                drives.Add(element)
+            End If
+        Next
+        Return drives
+    End Function
+
+    Private Function GetMappedDriveList(drives As List(Of MediumChanger.Element)) As List(Of Tuple(Of MediumChanger.Element, BlockDevice))
+        Dim result As New List(Of Tuple(Of MediumChanger.Element, BlockDevice))()
+        If drives Is Nothing OrElse drives.Count = 0 Then Return result
+        Dim deviceList As List(Of BlockDevice) = GetTapeDriveList()
+        Dim usedDevicePaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        For Each driveElement As MediumChanger.Element In drives
+            Dim identifier As String = driveElement.Identifier.Replace("  ", " ")
+            identifier = identifier.Replace("  ", " ")
+            identifier = identifier.Replace("  ", " ")
+            For Each device As BlockDevice In deviceList
+                If identifier.EndsWith(device.SerialNumber) Then
+                    If usedDevicePaths.Add(device.DevicePath) Then
+                        result.Add(New Tuple(Of MediumChanger.Element, BlockDevice)(driveElement, device))
+                    End If
+                    Exit For
+                End If
+            Next
+        Next
+        Return result
+    End Function
+
+    Private Function SelectBatchDrives(mappedDrives As List(Of Tuple(Of MediumChanger.Element, BlockDevice))) As List(Of Tuple(Of MediumChanger.Element, BlockDevice))
+        If mappedDrives Is Nothing OrElse mappedDrives.Count <= 1 Then Return mappedDrives
+
+        Dim selectedDrives As List(Of Tuple(Of MediumChanger.Element, BlockDevice)) = Nothing
+        Dim canceled As Boolean = False
+        Invoke(Sub()
+                   Using dialog As New ChangerDriveSelectorForm(mappedDrives,
+                                                               GetLocalizedString("Batch_SelectDrives_Title"),
+                                                               GetLocalizedString("Batch_SelectDrives_Label"),
+                                                               GetLocalizedString("Dialog_OK"),
+                                                               GetLocalizedString("Dialog_Cancel"))
+                       If dialog.ShowDialog(Me) = DialogResult.OK Then
+                           selectedDrives = dialog.SelectedDrives
+                       Else
+                           canceled = True
+                       End If
+                   End Using
+               End Sub)
+        If canceled Then Return Nothing
+        Return selectedDrives
+    End Function
+
+    Private Shared Function DequeueTape(queue As List(Of MediumChanger.Element), queueLock As Object) As MediumChanger.Element
+        SyncLock queueLock
+            If queue.Count = 0 Then Return Nothing
+            Dim tape As MediumChanger.Element = queue(0)
+            queue.RemoveAt(0)
+            Return tape
+        End SyncLock
+    End Function
+
+    Private Function GetChangerPath() As String
+        Dim changerPath As String = $"\\.\CHANGER{CurrentChanger.DevIndex}"
+        If CurrentChanger.device IsNot Nothing Then changerPath = CurrentChanger.device.DevicePath
+        Return changerPath
+    End Function
+
+    Private Sub AppendLog(message As String)
+        If IsDisposed OrElse Not IsHandleCreated Then Exit Sub
+        Try
+            Invoke(Sub() TextBox1.AppendText($"{message}{Environment.NewLine}"))
+        Catch ex As Exception
+            Log.Debug(ex, "Failed to append batch log message.")
+        End Try
+    End Sub
+
+    Private Sub ShowMessageOnUI(message As String, caption As String, icon As MessageBoxIcon)
+        If IsDisposed OrElse Not IsHandleCreated Then Exit Sub
+        Try
+            Invoke(Sub() MessageBox.Show(Me, message, caption, MessageBoxButtons.OK, icon))
+        Catch ex As Exception
+            Log.Debug(ex, "Failed to show batch message.")
+        End Try
+    End Sub
+
+    Private Function MoveMediumForBatch(changerPath As String, sourceElement As MediumChanger.Element, destinationElement As MediumChanger.Element) As Boolean
+        Return ApplicationWheels.TryExecute(Function() As Byte()
+            Dim sense(63) As Byte
+            MediumChanger.MoveMedium(changerPath, sourceElement.ElementAddress, destinationElement.ElementAddress, sense, sourceElement.LUN)
+            Return sense
+        End Function)
+    End Function
+
+    Private Sub ReturnTapesToSlots(changerPath As String, mappedDrives As List(Of Tuple(Of MediumChanger.Element, BlockDevice)), tapes As List(Of MediumChanger.Element))
+        If mappedDrives Is Nothing OrElse tapes Is Nothing Then Exit Sub
+        For index As Integer = 0 To Math.Min(mappedDrives.Count, tapes.Count) - 1
+            Try
+                MoveMediumForBatch(changerPath, mappedDrives(index).Item1, tapes(index))
+            Catch ex As Exception
+                AppendLog($"  Failed to return {tapes(index).PrimaryVolumeTagInformation}: {ex.Message}")
+                Log.Error(ex, "Failed to return tape {Barcode} to slot.", tapes(index).PrimaryVolumeTagInformation)
+            End Try
+        Next
+    End Sub
+
+    Private Function ProbeMaxExtraPartitionAllowed(drivePath As String) As Byte
+        Dim handle As IntPtr = IntPtr.Zero
+        Try
+            If Not TapeUtils.OpenTapeDrive(drivePath, handle) Then Return 0
+            Dim maxExtraPartition As Byte = 0
+            Dim modeData As Byte() = TapeUtils.ModeSense(handle, &H11)
+            If modeData IsNot Nothing AndAlso modeData.Length >= 3 Then maxExtraPartition = modeData(2)
+            If TapeUtils.DriverTypeSetting = TapeUtils.DriverType.TapeStream Then maxExtraPartition = 1
+            If maxExtraPartition > 1 Then maxExtraPartition = 1
+            Return maxExtraPartition
+        Catch ex As Exception
+            AppendLog($"Probe partition capability failed on {drivePath}: {ex.Message}")
+            Log.Debug(ex, "Batch format ModeSense failed.")
+            Return 0
+        Finally
+            If handle <> IntPtr.Zero Then
+                Try
+                    TapeUtils.LoadEject(handle, TapeUtils.LoadOption.Unthread)
+                Catch ex As Exception
+                    AppendLog($"Unthread failed: {ex.Message}")
+                End Try
+                TapeUtils.CloseTapeDrive(handle)
+            End If
+        End Try
+    End Function
+
+    Private Function BuildFormatParamTemplate(maxExtraPartitionAllowed As Byte) As TapeUtils.MKLTFS_Param
+        Dim param As New TapeUtils.MKLTFS_Param(maxExtraPartitionAllowed)
+        If My.Settings.LTFSWriter_DisablePartition Then param.ExtraPartitionCount = 0
+        If param.MaxExtraPartitionAllowed = 0 Then
+            If My.Settings.TapeUtils_DriverType = TapeUtils.DriverType.LTO Then param.BlockLen = 65536
+        End If
+        param.BlockLen = Math.Min(param.BlockLen, TapeUtils.GlobalBlockLimit)
+        ' Barcode 与 VolumeLabel 由每盘磁带自己的条码在批量执行时填入
+        param.Barcode = ""
+        param.VolumeLabel = ""
+        Return param
+    End Function
+
+    Private Function CloneFormatParam(template As TapeUtils.MKLTFS_Param) As TapeUtils.MKLTFS_Param
+        Dim param As New TapeUtils.MKLTFS_Param(template.MaxExtraPartitionAllowed)
+        param.BlockLen = template.BlockLen
+        param.Capacity = template.Capacity
+        param.P0Size = template.P0Size
+        param.P1Size = template.P1Size
+        param.EncryptionKey = template.EncryptionKey
+        param.WORMMode = template.WORMMode
+        param.ImmediateMode = template.ImmediateMode
+        param.ExtraPartitionCount = template.ExtraPartitionCount
+        Return param
+    End Function
+
+    Private Function ShowFormatParamDialog(param As TapeUtils.MKLTFS_Param, title As String) As Boolean
+        Dim confirmed As Boolean = False
+        Invoke(Sub()
+                   Using dialog As New SettingPanel With {.SelectedObject = param, .StartPosition = FormStartPosition.Manual, .TopMost = True, .Text = title}
+                       dialog.Top = CInt(Top + Height / 2 - dialog.Height / 2)
+                       dialog.Left = CInt(Left + Width / 2 - dialog.Width / 2)
+                       confirmed = dialog.ShowDialog(Me) = DialogResult.OK
+                   End Using
+               End Sub)
+        Return confirmed
+    End Function
+
+    Private Function FormatTapeWithParam(drivePath As String, param As TapeUtils.MKLTFS_Param) As Boolean
+        Dim handle As IntPtr = IntPtr.Zero
+        If Not TapeUtils.OpenTapeDrive(drivePath, handle) Then
+            Throw New Exception($"Cannot open tape drive {drivePath}.")
+        End If
+        Try
+            Dim lastError As String = String.Empty
+            Dim formatSucceeded As Boolean = TapeUtils.mkltfs(handle, param.Barcode, param.VolumeLabel, param.ExtraPartitionCount, param.BlockLen, True,
+                                                              Sub(message As String) AppendLog($"{param.Barcode}: {message}"),
+                                                              Sub(message As String) AppendLog($"{param.Barcode}: {message}"),
+                                                              Sub(message As String)
+                                                                  lastError = message
+                                                                  AppendLog($"{param.Barcode}: {message}")
+                                                              End Sub,
+                                                              param.Capacity, param.P0Size, param.P1Size, param.EncryptionKey, param.WORMMode)
+            If Not formatSucceeded Then
+                Throw New Exception($"Format failed: {lastError}")
+            End If
+            Return True
+        Finally
+            Try
+                TapeUtils.LoadEject(handle, TapeUtils.LoadOption.Unthread)
+            Catch ex As Exception
+                AppendLog($"Unthread failed: {ex.Message}")
+            End Try
+            TapeUtils.CloseTapeDrive(handle)
+        End Try
+    End Function
+
+    Private Function ReadTapeCMReport(drivePath As String, ByRef cmData As TapeUtils.CMParser) As String
+        Dim handle As IntPtr = IntPtr.Zero
+        If Not TapeUtils.OpenTapeDrive(drivePath, handle) Then
+            Throw New Exception($"Cannot open tape drive {drivePath}.")
+        End If
+        Try
+            TapeUtils.LoadEject(handle, TapeUtils.LoadOption.LoadThreaded)
+            cmData = New TapeUtils.CMParser(handle)
+            Return cmData.GetReport()
+        Finally
+            Try
+                TapeUtils.LoadEject(handle, TapeUtils.LoadOption.Unthread)
+            Catch ex As Exception
+                AppendLog($"Unthread failed: {ex.Message}")
+            End Try
+            TapeUtils.CloseTapeDrive(handle)
+        End Try
+    End Function
+
+    Private Sub 批量格式化ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 批量格式化ToolStripMenuItem.Click
+        Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(ChangerTool))
+            Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Changer")
+                Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
+                    Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "BatchFormat")
+                        If CurrentChanger Is Nothing Then
+                            MessageBox.Show(Me, GetLocalizedString("Batch_NoChanger"), Text, MessageBoxButtons.OK, MessageBoxIcon.Warning)
+                            Exit Sub
+                        End If
+                        Log.Information("Batch format started.")
+                        Dim noDriveMessage As String = GetLocalizedString("Batch_NoDrive")
+                        Dim noTapeMessage As String = GetLocalizedString("Batch_NoTape")
+                        Dim confirmTemplate As String = GetLocalizedString("BatchFormat_Confirm")
+                        Dim finishedTemplate As String = GetLocalizedString("BatchFormat_Finished")
+                        Dim title As String = GetLocalizedString("BatchFormat_Title")
+                        Dim parameterTitle As String = GetLocalizedString("BatchFormat_ParamsTitle")
+                        SetUILock(True)
+                        Task.Run(Sub()
+                                     Dim succeeded As Integer = 0
+                                     Dim failed As Integer = 0
+                                     Dim changerPath As String = String.Empty
+                                     Try
+                                         AppendLog("Loading elements...")
+                                         RefreshCurrentChanger()
+                                         changerPath = GetChangerPath()
+                                         Dim drives As List(Of MediumChanger.Element) = GetAvailableTapeDrives()
+                                         Dim tapes As List(Of MediumChanger.Element) = GetStoredTapeElements()
+                                         If drives.Count = 0 Then
+                                             ShowMessageOnUI(noDriveMessage, title, MessageBoxIcon.Warning)
+                                             Return
+                                         End If
+                                         If tapes.Count = 0 Then
+                                             ShowMessageOnUI(noTapeMessage, title, MessageBoxIcon.Warning)
+                                             Return
+                                         End If
+                                         Dim mappedDrives As List(Of Tuple(Of MediumChanger.Element, BlockDevice)) = GetMappedDriveList(drives)
+                                         If mappedDrives.Count = 0 Then
+                                             ShowMessageOnUI(noDriveMessage, title, MessageBoxIcon.Warning)
+                                             Return
+                                         End If
+                                         Dim formatTapes As New List(Of MediumChanger.Element)()
+                                         For Each tape As MediumChanger.Element In tapes
+                                             If String.IsNullOrWhiteSpace(tape.PrimaryVolumeTagInformation) Then
+                                                 failed += 1
+                                                 AppendLog("Skipped tape without barcode.")
+                                                 Continue For
+                                             End If
+                                             formatTapes.Add(tape)
+                                         Next
+                                         If formatTapes.Count = 0 Then
+                                             RefreshCurrentChanger()
+                                             ShowMessageOnUI(String.Format(finishedTemplate, succeeded, failed), title, MessageBoxIcon.Information)
+                                             Return
+                                         End If
+                                         Dim selectedTapes As List(Of MediumChanger.Element) = Nothing
+                                         Invoke(Sub()
+                                             Using dialog As New ChangerTapeSelectorForm(formatTapes,
+                                                                                        GetLocalizedString("BatchFormat_Title"),
+                                                                                        GetLocalizedString("BatchFormat_Label"),
+                                                                                        GetLocalizedString("Dialog_OK"),
+                                                                                        GetLocalizedString("Dialog_Cancel"))
+                                                 If dialog.ShowDialog(Me) = DialogResult.OK Then selectedTapes = dialog.SelectedElements
+                                             End Using
+                                         End Sub)
+                                         If selectedTapes Is Nothing OrElse selectedTapes.Count = 0 Then
+                                             AppendLog("No tape selected. Batch format cancelled.")
+                                             RefreshCurrentChanger()
+                                             Return
+                                         End If
+                                         formatTapes = selectedTapes
+
+                                         Dim selectedDrives As List(Of Tuple(Of MediumChanger.Element, BlockDevice)) = SelectBatchDrives(mappedDrives)
+                                         If selectedDrives Is Nothing OrElse selectedDrives.Count = 0 Then
+                                             AppendLog("Drive selection cancelled.")
+                                             RefreshCurrentChanger()
+                                             Return
+                                         End If
+                                         mappedDrives = selectedDrives
+
+                                         Dim workerCount As Integer = Math.Min(mappedDrives.Count, formatTapes.Count)
+                                         Dim loadedTapes As New List(Of MediumChanger.Element)()
+                                         Dim minMaxExtraPartition As Byte = Byte.MaxValue
+                                        For driveIndex As Integer = 0 To workerCount - 1
+                                            Dim driveElement As MediumChanger.Element = mappedDrives(driveIndex).Item1
+                                            Dim tape As MediumChanger.Element = formatTapes(driveIndex)
+                                            Dim tapeBarcode As String = tape.PrimaryVolumeTagInformation
+                                            AppendLog($"Moving {tapeBarcode} to drive {driveElement.Identifier} ...")
+                                            Dim moved As Boolean
+                                            Try
+                                                moved = MoveMediumForBatch(changerPath, tape, driveElement)
+                                            Catch ex As Exception
+                                                moved = False
+                                                Log.Error(ex, "Failed to move tape {Barcode} to drive.", tapeBarcode)
+                                            End Try
+                                            If Not moved Then
+                                                failed += 1
+                                                AppendLog($"  Failed to move {tapeBarcode} to drive.")
+                                                ReturnTapesToSlots(changerPath, mappedDrives, loadedTapes)
+                                                RefreshCurrentChanger()
+                                                ShowMessageOnUI(String.Format(finishedTemplate, succeeded, failed), title, MessageBoxIcon.Warning)
+                                                Return
+                                            End If
+                                            loadedTapes.Add(tape)
+                                            Dim maxExtraPartition As Byte = ProbeMaxExtraPartitionAllowed(mappedDrives(driveIndex).Item2.DevicePath)
+                                            If maxExtraPartition < minMaxExtraPartition Then minMaxExtraPartition = maxExtraPartition
+                                        Next
+                                         If minMaxExtraPartition = Byte.MaxValue Then minMaxExtraPartition = 0
+                                         Dim formatParamTemplate As TapeUtils.MKLTFS_Param = BuildFormatParamTemplate(minMaxExtraPartition)
+                                         Dim parametersConfirmed As Boolean = ShowFormatParamDialog(formatParamTemplate, parameterTitle)
+                                         If Not parametersConfirmed Then
+                                                ReturnTapesToSlots(changerPath, mappedDrives, loadedTapes)
+                                                RefreshCurrentChanger()
+                                                Return
+                                         End If
+                                         Dim confirmResult As DialogResult = DialogResult.Cancel
+                                         Invoke(Sub() confirmResult = MessageBox.Show(Me, String.Format(confirmTemplate, formatTapes.Count), title, MessageBoxButtons.OKCancel, MessageBoxIcon.Warning))
+                                         If confirmResult <> DialogResult.OK Then
+                                                ReturnTapesToSlots(changerPath, mappedDrives, loadedTapes)
+                                                RefreshCurrentChanger()
+                                                Return
+                                         End If
+                                         TapeUtils.AllowPartition = formatParamTemplate.ExtraPartitionCount > 0
+                                         Dim pendingTapes As New List(Of MediumChanger.Element)()
+                                         If formatTapes.Count > workerCount Then pendingTapes.AddRange(formatTapes.GetRange(workerCount, formatTapes.Count - workerCount))
+                                         Dim queueLock As New Object()
+                                         Dim workers As New List(Of Task)()
+                                         For driveIndex As Integer = 0 To workerCount - 1
+                                             Dim driveInfo As Tuple(Of MediumChanger.Element, BlockDevice) = mappedDrives(driveIndex)
+                                             Dim initialTape As MediumChanger.Element = loadedTapes(driveIndex)
+                                             workers.Add(Task.Run(Sub()
+                                                                      Try
+                                                                          Dim firstIteration As Boolean = True
+                                                                          Dim currentTape As MediumChanger.Element = initialTape
+                                                                          Do
+                                                                              If firstIteration Then
+                                                                                  firstIteration = False
+                                                                              Else
+                                                                                  currentTape = DequeueTape(pendingTapes, queueLock)
+                                                                                  If currentTape Is Nothing Then Exit Do
+                                                                                  Dim movedBarcode As String = currentTape.PrimaryVolumeTagInformation
+                                                                                  AppendLog($"Moving {movedBarcode} to drive {driveInfo.Item1.Identifier} ...")
+                                                                                  Dim moved As Boolean
+                                                                                  Try
+                                                                                      moved = MoveMediumForBatch(changerPath, currentTape, driveInfo.Item1)
+                                                                                  Catch ex As Exception
+                                                                                      moved = False
+                                                                                      Log.Error(ex, "Failed to move tape to drive.")
+                                                                                  End Try
+                                                                                  If Not moved Then
+                                                                                      Interlocked.Increment(failed)
+                                                                                      AppendLog($"  Failed to move {movedBarcode} to drive.")
+                                                                                      currentTape = Nothing
+                                                                                      Continue Do
+                                                                                  End If
+                                                                              End If
+                                                                              Dim tapeBarcode As String = currentTape.PrimaryVolumeTagInformation
+                                                                              Try
+                                                                                  Dim tapeParam As TapeUtils.MKLTFS_Param = CloneFormatParam(formatParamTemplate)
+                                                                                  tapeParam.Barcode = tapeBarcode
+                                                                                  tapeParam.VolumeLabel = tapeBarcode
+                                                                                  AppendLog($"Formatting {tapeBarcode} on {driveInfo.Item2.DevicePath} ...")
+                                                                                  FormatTapeWithParam(driveInfo.Item2.DevicePath, tapeParam)
+                                                                                  Interlocked.Increment(succeeded)
+                                                                                  AppendLog($"  Formatted {tapeBarcode}.")
+                                                                              Catch ex As Exception
+                                                                                  Interlocked.Increment(failed)
+                                                                                  AppendLog($"  Failed to format {tapeBarcode}: {ex.Message}")
+                                                                                  Log.Error(ex, "Failed to format tape {Barcode}.", tapeBarcode)
+                                                                              Finally
+                                                                                  If currentTape IsNot Nothing Then
+                                                                                      Try
+                                                                                          MoveMediumForBatch(changerPath, driveInfo.Item1, currentTape)
+                                                                                      Catch ex As Exception
+                                                                                          AppendLog($"  Failed to return {tapeBarcode}: {ex.Message}")
+                                                                                          Log.Error(ex, "Failed to return tape {Barcode} to slot.", tapeBarcode)
+                                                                                      End Try
+                                                                                  End If
+                                                                                  currentTape = Nothing
+                                                                              End Try
+                                                                          Loop
+                                                                      Catch ex As Exception
+                                                                          Interlocked.Increment(failed)
+                                                                          AppendLog($"Format worker failed: {ex.Message}")
+                                                                          Log.Error(ex, "Batch format worker failed.")
+                                                                      End Try
+                                                                  End Sub))
+                                         Next
+                                         Task.WaitAll(workers.ToArray())
+                                         RefreshCurrentChanger()
+                                         ShowMessageOnUI(String.Format(finishedTemplate, succeeded, failed), title, MessageBoxIcon.Information)
+                                     Catch ex As Exception
+                                         Log.Error(ex, "Batch format worker failed.")
+                                         ShowMessageOnUI(ex.ToString(), title, MessageBoxIcon.Error)
+                                     Finally
+                                         Invoke(Sub() SetUILock(False))
+                                     End Try
+                                 End Sub)
+                        Log.Information("Batch format worker finished.")
+                    End Using
+                End Using
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 批量读取CMToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 批量读取CMToolStripMenuItem.Click
+        Using sourceContextScope As IDisposable = LogContext.PushProperty("SourceContext", NameOf(ChangerTool))
+            Using categoryScope As IDisposable = LogContext.PushProperty("Category", "Changer")
+                Using sessionScope As IDisposable = LogContext.PushProperty("SessionId", _logSessionId)
+                    Using eventTypeScope As IDisposable = LogContext.PushProperty("EventType", "BatchReadCM")
+                        If CurrentChanger Is Nothing Then
+                            MessageBox.Show(Me, GetLocalizedString("Batch_NoChanger"), GetLocalizedString("BatchReadCM_Title"), MessageBoxButtons.OK, MessageBoxIcon.Warning)
+                            Exit Sub
+                        End If
+                        Log.Information("Batch CM read started.")
+                        Dim noDriveMessage As String = GetLocalizedString("Batch_NoDrive")
+                        Dim noTargetMessage As String = GetLocalizedString("BatchReadCM_NoTarget")
+                        Dim confirmTemplate As String = GetLocalizedString("BatchReadCM_Confirm")
+                        Dim finishedTemplate As String = GetLocalizedString("BatchReadCM_Finished")
+                        Dim title As String = GetLocalizedString("BatchReadCM_Title")
+                        SetUILock(True)
+                        Task.Run(Sub()
+                                     Dim succeeded As Integer = 0
+                                     Dim failed As Integer = 0
+                                     Dim mismatched As Integer = 0
+                                     Dim changerPath As String = String.Empty
+                                     Try
+                                         AppendLog("Loading elements...")
+                                         RefreshCurrentChanger()
+                                         changerPath = GetChangerPath()
+                                         Dim drives As List(Of MediumChanger.Element) = GetAvailableTapeDrives()
+                                         Dim tapes As List(Of MediumChanger.Element) = GetStoredTapeElements()
+                                         If drives.Count = 0 Then
+                                             ShowMessageOnUI(noDriveMessage, title, MessageBoxIcon.Warning)
+                                             Return
+                                         End If
+                                         Dim mappedDrives As List(Of Tuple(Of MediumChanger.Element, BlockDevice)) = GetMappedDriveList(drives)
+                                         If mappedDrives.Count = 0 Then
+                                             ShowMessageOnUI(noDriveMessage, title, MessageBoxIcon.Warning)
+                                             Return
+                                         End If
+                                         Dim targetTapes As New List(Of MediumChanger.Element)()
+                                         For Each tape As MediumChanger.Element In tapes
+                                             Dim tapeBarcode As String = tape.PrimaryVolumeTagInformation
+                                             If String.IsNullOrWhiteSpace(tapeBarcode) Then Continue For
+                                             tapeBarcode = tapeBarcode.Trim()
+                                             If LocalCMExists(tapeBarcode) Then Continue For
+                                             targetTapes.Add(tape)
+                                         Next
+                                         If targetTapes.Count = 0 Then
+                                             RefreshCurrentChanger()
+                                             ShowMessageOnUI(noTargetMessage, title, MessageBoxIcon.Information)
+                                             Return
+                                         End If
+                                         Dim selectedDrives As List(Of Tuple(Of MediumChanger.Element, BlockDevice)) = SelectBatchDrives(mappedDrives)
+                                         If selectedDrives Is Nothing OrElse selectedDrives.Count = 0 Then
+                                             AppendLog("Drive selection cancelled.")
+                                             RefreshCurrentChanger()
+                                             Return
+                                         End If
+                                         mappedDrives = selectedDrives
+
+                                         Dim confirmResult As DialogResult = DialogResult.Cancel
+                                         Invoke(Sub() confirmResult = MessageBox.Show(Me, String.Format(confirmTemplate, targetTapes.Count), title, MessageBoxButtons.OKCancel, MessageBoxIcon.Warning))
+                                         If confirmResult <> DialogResult.OK Then Return
+                                         Dim workerCount As Integer = Math.Min(mappedDrives.Count, targetTapes.Count)
+                                         Dim pendingTapes As New List(Of MediumChanger.Element)(targetTapes)
+                                         Dim queueLock As New Object()
+                                         Dim workers As New List(Of Task)()
+                                         For driveIndex As Integer = 0 To workerCount - 1
+                                             Dim driveInfo As Tuple(Of MediumChanger.Element, BlockDevice) = mappedDrives(driveIndex)
+                                             workers.Add(Task.Run(Sub()
+                                                                      Try
+                                                                          Do
+                                                                              Dim currentTape As MediumChanger.Element = DequeueTape(pendingTapes, queueLock)
+                                                                              If currentTape Is Nothing Then Exit Do
+                                                                              Dim tapeBarcode As String = currentTape.PrimaryVolumeTagInformation.Trim()
+                                                                              AppendLog($"Moving {tapeBarcode} to drive {driveInfo.Item1.Identifier} ...")
+                                                                              Dim moved As Boolean
+                                                                              Try
+                                                                                  moved = MoveMediumForBatch(changerPath, currentTape, driveInfo.Item1)
+                                                                              Catch ex As Exception
+                                                                                  moved = False
+                                                                                  Log.Error(ex, "Failed to move tape to drive.")
+                                                                              End Try
+                                                                              If Not moved Then
+                                                                                  Interlocked.Increment(failed)
+                                                                                  AppendLog($"  Failed to move {tapeBarcode} to drive.")
+                                                                                  Continue Do
+                                                                              End If
+                                                                              Try
+                                                                                  AppendLog($"Reading CM from {tapeBarcode} on {driveInfo.Item2.DevicePath} ...")
+                                                                                  Dim cmData As TapeUtils.CMParser = Nothing
+                                                                                  Dim report As String = ReadTapeCMReport(driveInfo.Item2.DevicePath, cmData)
+                                                                                  If String.IsNullOrWhiteSpace(report) Then Throw New Exception("CM report is empty.")
+                                                                                  Dim cmBarcode As String = Nothing
+                                                                                  If cmData IsNot Nothing AndAlso cmData.ApplicationSpecificData IsNot Nothing Then cmBarcode = cmData.ApplicationSpecificData.Barcode
+                                                                                  If Not String.IsNullOrWhiteSpace(cmBarcode) Then
+                                                                                      cmBarcode = cmBarcode.Trim()
+                                                                                      If Not String.Equals(cmBarcode, tapeBarcode, StringComparison.OrdinalIgnoreCase) Then
+                                                                                          Interlocked.Increment(mismatched)
+                                                                                          AppendLog($"  Barcode mismatch: slot={tapeBarcode} CM={cmBarcode}")
+                                                                                      End If
+                                                                                  Else
+                                                                                      AppendLog($"  CM barcode unavailable: {tapeBarcode}")
+                                                                                  End If
+                                                                                  Dim savedPath As String = SaveLocalCMReport(tapeBarcode, report)
+                                                                                  Interlocked.Increment(succeeded)
+                                                                                  AppendLog($"  Saved CM: {savedPath}")
+                                                                              Catch ex As Exception
+                                                                                  Interlocked.Increment(failed)
+                                                                                  AppendLog($"  Failed to read CM from {tapeBarcode}: {ex.Message}")
+                                                                                  Log.Error(ex, "Failed to read CM from tape {Barcode}.", tapeBarcode)
+                                                                              Finally
+                                                                                  Try
+                                                                                      MoveMediumForBatch(changerPath, driveInfo.Item1, currentTape)
+                                                                                  Catch ex As Exception
+                                                                                      AppendLog($"  Failed to return {tapeBarcode}: {ex.Message}")
+                                                                                      Log.Error(ex, "Failed to return tape {Barcode} to slot.", tapeBarcode)
+                                                                                  End Try
+                                                                              End Try
+                                                                          Loop
+                                                                      Catch ex As Exception
+                                                                          Interlocked.Increment(failed)
+                                                                          AppendLog($"CM read worker failed: {ex.Message}")
+                                                                          Log.Error(ex, "Batch CM read worker failed.")
+                                                                      End Try
+                                                                  End Sub))
+                                         Next
+                                         Task.WaitAll(workers.ToArray())
+                                         RefreshCurrentChanger()
+                                         ShowMessageOnUI(String.Format(finishedTemplate, succeeded, failed, mismatched), title, MessageBoxIcon.Information)
+                                     Catch ex As Exception
+                                         Log.Error(ex, "Batch CM read worker failed.")
+                                         ShowMessageOnUI(ex.ToString(), title, MessageBoxIcon.Error)
+                                     Finally
+                                         Invoke(Sub() SetUILock(False))
+                                     End Try
+                                 End Sub)
+                        Log.Information("Batch CM read worker finished.")
+                    End Using
+                End Using
+            End Using
+        End Using
+    End Sub
+
+    Private Sub 文件管理器ToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles 文件管理器ToolStripMenuItem.Click
+        If CurrentChanger Is Nothing Then
+            MessageBox.Show(Me, GetLocalizedString("Batch_NoChanger"), GetLocalizedString("FileManager_Title"), MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            Return
+        End If
+
+        Using dialog As New ChangerFileManagerForm(CurrentChanger, GetChangerPath())
+            dialog.ShowDialog(Me)
+        End Using
+
+        If LoadComplete AndAlso CheckBox1.Checked Then
+            SetUILock(True)
+            Task.Run(Sub()
+                         Try
+                             RefreshCurrentChanger()
+                         Catch ex As Exception
+                             Log.Error(ex, "Failed to refresh changer after closing file manager.")
+                         Finally
+                             Invoke(Sub()
+                                        SwitchChanger()
+                                        SetUILock(False)
+                                    End Sub)
+                         End Try
+                     End Sub)
+        End If
+    End Sub
+
     Private Sub Button4_MouseUp(sender As Object, e As MouseEventArgs) Handles Button4.MouseUp
         ContextMenuStrip1.Show(Button4, e.X, e.Y)
+    End Sub
+End Class
+
+Friend Class ChangerTapeSelectorForm
+    Inherits Form
+
+    Private ReadOnly _list As New CheckedListBox()
+    Private ReadOnly _elements As New List(Of MediumChanger.Element)
+
+    Public ReadOnly Property SelectedElements As List(Of MediumChanger.Element)
+        Get
+            Dim selected As New List(Of MediumChanger.Element)
+            For Each index As Integer In _list.CheckedIndices
+                selected.Add(_elements(index))
+            Next
+            Return selected
+        End Get
+    End Property
+
+    Public Sub New(tapes As List(Of MediumChanger.Element), title As String, label As String, okText As String, cancelText As String)
+        Text = title
+        Size = New Drawing.Size(420, 360)
+        StartPosition = FormStartPosition.CenterParent
+        MinimizeBox = False
+        MaximizeBox = False
+        ShowInTaskbar = False
+        Dim topPanel As New Panel() With {.Dock = DockStyle.Top, .Height = 40}
+        Dim labelControl As New Label() With {.Dock = DockStyle.Fill, .Text = label, .TextAlign = Drawing.ContentAlignment.MiddleLeft, .Padding = New Padding(8, 0, 8, 0)}
+        topPanel.Controls.Add(labelControl)
+        _list.Dock = DockStyle.Fill
+        _list.CheckOnClick = True
+        _list.IntegralHeight = False
+        For Each tape As MediumChanger.Element In tapes
+            _elements.Add(tape)
+            Dim barcode As String = If(tape.PrimaryVolumeTagInformation, "").Trim()
+            _list.Items.Add($"{barcode} @0x{Hex(tape.ElementAddress).PadLeft(4, "0"c)} LUN{tape.LUN}")
+        Next
+        Dim bottomPanel As New FlowLayoutPanel() With {.Dock = DockStyle.Bottom, .Height = 44, .FlowDirection = FlowDirection.RightToLeft, .Padding = New Padding(0, 8, 8, 0)}
+        Dim okButton As New Button() With {.Text = okText, .DialogResult = DialogResult.OK, .Size = New Drawing.Size(80, 26)}
+        Dim cancelButton As New Button() With {.Text = cancelText, .DialogResult = DialogResult.Cancel, .Size = New Drawing.Size(80, 26)}
+        bottomPanel.Controls.Add(okButton)
+        bottomPanel.Controls.Add(cancelButton)
+        AcceptButton = okButton
+        CancelButton = cancelButton
+        Controls.Add(_list)
+        Controls.Add(topPanel)
+        Controls.Add(bottomPanel)
+    End Sub
+End Class
+
+
+Friend Class ChangerDriveSelectorForm
+    Inherits Form
+
+    Private ReadOnly _list As New CheckedListBox()
+    Private ReadOnly _drives As New List(Of Tuple(Of MediumChanger.Element, BlockDevice))
+    Private ReadOnly _okButton As New Button()
+
+    Public ReadOnly Property SelectedDrives As List(Of Tuple(Of MediumChanger.Element, BlockDevice))
+        Get
+            Dim selected As New List(Of Tuple(Of MediumChanger.Element, BlockDevice))
+            For Each index As Integer In _list.CheckedIndices
+                selected.Add(_drives(index))
+            Next
+            Return selected
+        End Get
+    End Property
+
+    Public Sub New(drives As List(Of Tuple(Of MediumChanger.Element, BlockDevice)), title As String, label As String, okText As String, cancelText As String)
+        Text = title
+        Size = New Drawing.Size(560, 340)
+        StartPosition = FormStartPosition.CenterParent
+        MinimizeBox = False
+        MaximizeBox = False
+        ShowInTaskbar = False
+        Dim topPanel As New Panel() With {.Dock = DockStyle.Top, .Height = 40}
+        Dim labelControl As New Label() With {.Dock = DockStyle.Fill, .Text = label, .TextAlign = Drawing.ContentAlignment.MiddleLeft, .Padding = New Padding(8, 0, 8, 0)}
+        topPanel.Controls.Add(labelControl)
+        _list.Dock = DockStyle.Fill
+        _list.CheckOnClick = True
+        _list.IntegralHeight = False
+        For Each drive As Tuple(Of MediumChanger.Element, BlockDevice) In drives
+            _drives.Add(drive)
+            Dim address As String = Hex(drive.Item1.ElementAddress).PadLeft(4, "0"c)
+            _list.Items.Add($"{drive.Item2.DevicePath}  @0x{address}  [{drive.Item2.SerialNumber}]", True)
+        Next
+        _okButton.Text = okText
+        _okButton.DialogResult = DialogResult.OK
+        _okButton.Size = New Drawing.Size(80, 26)
+        AddHandler _list.ItemCheck, Sub(sender As Object, e As ItemCheckEventArgs)
+                                        Dim checkedCount As Integer = _list.CheckedIndices.Count
+                                        If e.NewValue = CheckState.Checked Then
+                                            checkedCount += 1
+                                        ElseIf e.NewValue = CheckState.Unchecked Then
+                                            checkedCount -= 1
+                                        End If
+                                        _okButton.Enabled = checkedCount > 0
+                                    End Sub
+        Dim cancelButton As New Button() With {.Text = cancelText, .DialogResult = DialogResult.Cancel, .Size = New Drawing.Size(80, 26)}
+        Dim bottomPanel As New FlowLayoutPanel() With {.Dock = DockStyle.Bottom, .Height = 44, .FlowDirection = FlowDirection.RightToLeft, .Padding = New Padding(0, 8, 8, 0)}
+        bottomPanel.Controls.Add(_okButton)
+        bottomPanel.Controls.Add(cancelButton)
+        AcceptButton = _okButton
+        CancelButton = cancelButton
+        Controls.Add(_list)
+        Controls.Add(topPanel)
+        Controls.Add(bottomPanel)
     End Sub
 End Class
