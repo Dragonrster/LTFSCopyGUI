@@ -758,6 +758,7 @@ Friend NotInheritable Class ChangerFileManagerCore
                     Dim tempPath As String = Nothing
                     If Not tempPaths.TryGetValue(planItem.Item, tempPath) Then
                         tempPath = targetPath & ".part"
+                        EnsureParentDirectory(tempPath)
                         If File.Exists(tempPath) Then File.Delete(tempPath)
                         tempPaths(planItem.Item) = tempPath
                     End If

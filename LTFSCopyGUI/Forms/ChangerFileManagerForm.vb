@@ -380,20 +380,17 @@ Friend Class ChangerFileManagerForm
         End If
 
         SetStatus($"[{slot.Barcode}] 请在文件浏览器中勾选要提取的文件")
-        Dim editableIndex As ltfsindex = index
-        Dim transaction As LazySelectionTransaction = index.BeginSelectionTransaction()
-        If transaction Is Nothing Then editableIndex = index.Clone()
+        Dim browser As ChangerTapeBrowserForm = Nothing
         Dim accepted As Boolean = False
+        Dim selectedFiles As List(Of ChangerFileManagerCore.SelectedFile) = Nothing
         Try
-            accepted = (FileBrowser.ShowDialog(editableIndex) = DialogResult.OK)
-        Finally
-            If transaction IsNot Nothing Then
-                If accepted Then
-                    transaction.Commit()
-                Else
-                    transaction.Rollback()
-                End If
+            browser = New ChangerTapeBrowserForm(index, slot.Barcode, GetEffectiveBarcode(slot))
+            If browser.ShowDialog(Me) = DialogResult.OK Then
+                accepted = True
+                selectedFiles = browser.SelectedFiles
             End If
+        Finally
+            If browser IsNot Nothing Then browser.Dispose()
         End Try
         If Not accepted Then
             AppendLog("已取消文件选择。")
@@ -401,7 +398,8 @@ Friend Class ChangerFileManagerForm
             Return
         End If
 
-        Dim files As List(Of ChangerFileManagerCore.SelectedFile) = _core.CollectSelectedFiles(editableIndex, slot.Barcode)
+        Dim files As List(Of ChangerFileManagerCore.SelectedFile) = selectedFiles
+        If files Is Nothing Then files = New List(Of ChangerFileManagerCore.SelectedFile)()
         _selections(slot.Barcode) = files
         slot.Status = $"已选择 {files.Count} 个文件（待提取）"
         UpdateRow(slot)
