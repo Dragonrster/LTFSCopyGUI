@@ -44,6 +44,7 @@ Public Class ChangerTapeBrowserForm
     Private _sortColumn As Integer = 0
     Private _sortAscending As Boolean = True
     Private _suppressCheckEvents As Boolean
+    Private _suppressTreeCheckEvents As Boolean
 
     Public Sub New(index As ltfsindex, barcode As String, volumeLabel As String)
         _index = index
@@ -175,8 +176,10 @@ Public Class ChangerTapeBrowserForm
         _tree.HideSelection = False
         _tree.FullRowSelect = True
         _tree.ShowLines = False
+        _tree.CheckBoxes = True
         AddHandler _tree.BeforeExpand, AddressOf TreeBeforeExpand
         AddHandler _tree.AfterSelect, AddressOf TreeAfterSelect
+        AddHandler _tree.AfterCheck, AddressOf TreeAfterCheck
         split.Panel1.Controls.Add(_tree)
 
         _list = New DpiAwareListView()
@@ -235,7 +238,7 @@ Public Class ChangerTapeBrowserForm
             _tree.Nodes.Clear()
             Dim rootNode As New TreeNode("\\")
             rootNode.Name = String.Empty
-            rootNode.ToolTipText = "卷根目录"
+            rootNode.ToolTipText = "卷根目录（勾选 = 选择整盘全部文件）"
             rootNode.Nodes.Add(New TreeNode("加载中...") With {.Name = "__placeholder"})
             _tree.Nodes.Add(rootNode)
             _tree.SelectedNode = rootNode
@@ -245,6 +248,7 @@ Public Class ChangerTapeBrowserForm
         End Try
         LoadRootChildren(_tree.Nodes(0))
         ShowRootContents()
+        RefreshRootNodeCheck()
     End Sub
 
     Private Sub LoadRootChildren(rootNode As TreeNode)
@@ -267,6 +271,13 @@ Public Class ChangerTapeBrowserForm
         If HasChildDirectories(directory) Then
             node.Nodes.Add(New TreeNode("加载中...") With {.Name = "__placeholder"})
         End If
+        Dim previousSuppress As Boolean = _suppressTreeCheckEvents
+        _suppressTreeCheckEvents = True
+        Try
+            node.Checked = AreDirectoryFilesChecked(directory, relativePath)
+        Finally
+            _suppressTreeCheckEvents = previousSuppress
+        End Try
         parentNode.Nodes.Add(node)
     End Sub
 
@@ -480,11 +491,9 @@ Public Class ChangerTapeBrowserForm
     End Function
 
     ''' <summary>勾选/取消勾选整个目录（递归包含全部子文件），与主程序选择目录的语义一致。</summary>
-    Private Sub SetDirectoryChecked(entry As BrowserEntry, checked As Boolean)
-        If entry Is Nothing OrElse Not entry.IsDirectory Then Return
-        Dim childDirectory As ltfsindex.directory = TryCast(entry.Item, ltfsindex.directory)
-        If childDirectory Is Nothing Then Return
-        EnumerateDirectoryFiles(childDirectory, entry.RelativePath,
+    Private Sub SetDirectoryChecked(directory As ltfsindex.directory, relativePath As String, checked As Boolean)
+        If directory Is Nothing Then Return
+        EnumerateDirectoryFiles(directory, relativePath,
                                 Sub(childFile As ltfsindex.file, childPath As String)
                                     If checked Then
                                         _checkedFiles(childFile) = childPath
@@ -494,20 +503,224 @@ Public Class ChangerTapeBrowserForm
                                 End Sub)
     End Sub
 
-    ''' <summary>目录内的文件是否已全部勾选（用于列表刷新时显示目录勾选状态）。</summary>
-    Private Function AreDirectoryFilesChecked(entry As BrowserEntry) As Boolean
-        If entry Is Nothing OrElse Not entry.IsDirectory Then Return False
-        Dim childDirectory As ltfsindex.directory = TryCast(entry.Item, ltfsindex.directory)
-        If childDirectory Is Nothing Then Return False
+    ''' <summary>勾选/取消勾选整个目录（递归包含全部子文件），与主程序选择目录的语义一致。</summary>
+    Private Sub SetDirectoryChecked(entry As BrowserEntry, checked As Boolean)
+        If entry Is Nothing OrElse Not entry.IsDirectory Then Return
+        SetDirectoryChecked(TryCast(entry.Item, ltfsindex.directory), entry.RelativePath, checked)
+    End Sub
+
+    ''' <summary>目录内的文件是否已全部勾选（用于列表/树刷新时显示目录勾选状态）。</summary>
+    Private Function AreDirectoryFilesChecked(directory As ltfsindex.directory, relativePath As String) As Boolean
+        If directory Is Nothing Then Return False
         Dim total As Integer = 0
         Dim selectedCount As Integer = 0
-        EnumerateDirectoryFiles(childDirectory, entry.RelativePath,
+        EnumerateDirectoryFiles(directory, relativePath,
                                 Sub(childFile As ltfsindex.file, childPath As String)
                                     total += 1
                                     If _checkedFiles.ContainsKey(childFile) Then selectedCount += 1
                                 End Sub)
         Return total > 0 AndAlso selectedCount = total
     End Function
+
+    ''' <summary>目录内的文件是否已全部勾选（用于列表刷新时显示目录勾选状态）。</summary>
+    Private Function AreDirectoryFilesChecked(entry As BrowserEntry) As Boolean
+        If entry Is Nothing OrElse Not entry.IsDirectory Then Return False
+        Return AreDirectoryFilesChecked(TryCast(entry.Item, ltfsindex.directory), entry.RelativePath)
+    End Function
+
+    ''' <summary>遍历整个索引（卷根的根文件 + 所有目录内的文件）。</summary>
+    Private Function EnumerateIndexFiles(action As Action(Of ltfsindex.file, String)) As Integer
+        If _index Is Nothing OrElse action Is Nothing Then Return 0
+        Dim count As Integer = 0
+        If _index._file IsNot Nothing Then
+            For Each childFile In _index._file
+                If childFile Is Nothing Then Continue For
+                action(childFile, childFile.name)
+                count += 1
+            Next
+        End If
+        If _index._directory IsNot Nothing Then
+            For Each childDirectory In _index._directory
+                If childDirectory Is Nothing Then Continue For
+                count += EnumerateDirectoryFiles(childDirectory, childDirectory.name, action)
+            Next
+        End If
+        Return count
+    End Function
+
+    ''' <summary>整盘文件是否已全部勾选。</summary>
+    Private Function AreAllIndexFilesChecked() As Boolean
+        Dim total As Integer = 0
+        Dim selectedCount As Integer = 0
+        EnumerateIndexFiles(Sub(childFile As ltfsindex.file, childPath As String)
+                                total += 1
+                                If _checkedFiles.ContainsKey(childFile) Then selectedCount += 1
+                            End Sub)
+        Return total > 0 AndAlso selectedCount = total
+    End Function
+
+    ''' <summary>整盘勾选/取消勾选。</summary>
+    Private Sub SetRootChecked(checked As Boolean)
+        If checked Then
+            EnumerateIndexFiles(Sub(childFile As ltfsindex.file, childPath As String)
+                                    _checkedFiles(childFile) = childPath
+                                End Sub)
+        Else
+            _checkedFiles.Clear()
+        End If
+    End Sub
+
+    Private Shared Function IsTreeRootNode(node As TreeNode) As Boolean
+        Return node IsNot Nothing AndAlso node.Parent Is Nothing AndAlso TryCast(node.Tag, ltfsindex.directory) Is Nothing
+    End Function
+
+    ''' <summary>左侧目录树勾选/取消勾选：目录节点 = 递归选中/取消该目录全部文件；卷根节点 = 整盘。</summary>
+    Private Sub TreeAfterCheck(sender As Object, e As TreeViewEventArgs)
+        If _suppressTreeCheckEvents Then Return
+        Dim node As TreeNode = e.Node
+        If node Is Nothing Then Return
+        If IsTreeRootNode(node) Then
+            SetRootChecked(node.Checked)
+            SyncLoadedChildChecks(node, node.Checked)
+        Else
+            Dim directory As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+            If directory Is Nothing Then Return
+            SetDirectoryChecked(directory, node.Name, node.Checked)
+            SyncLoadedChildChecks(node, node.Checked)
+        End If
+        RefreshTreeNodeChecks(node.Parent)
+        RefreshRootNodeCheck()
+        RefreshListChecks()
+        UpdateStatus()
+    End Sub
+
+    ''' <summary>已加载的子节点同步勾选状态（防止父节点勾选后子节点显示不一致）。</summary>
+    Private Sub SyncLoadedChildChecks(node As TreeNode, checked As Boolean)
+        If node Is Nothing Then Return
+        Dim previousSuppress As Boolean = _suppressTreeCheckEvents
+        _suppressTreeCheckEvents = True
+        Try
+            For Each child As TreeNode In node.Nodes
+                If child.Name = "__placeholder" Then Continue For
+                If TryCast(child.Tag, ltfsindex.directory) IsNot Nothing Then
+                    child.Checked = checked
+                    SyncLoadedChildChecks(child, checked)
+                End If
+            Next
+        Finally
+            _suppressTreeCheckEvents = previousSuppress
+        End Try
+    End Sub
+
+    ''' <summary>按当前勾选状态刷新指定目录节点及其祖先节点。</summary>
+    Private Sub RefreshTreeNodeChecks(node As TreeNode)
+        If node Is Nothing Then Return
+        If IsTreeRootNode(node) Then
+            RefreshRootNodeCheck()
+            Return
+        End If
+        Dim directory As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+        If directory Is Nothing Then Return
+        Dim previousSuppress As Boolean = _suppressTreeCheckEvents
+        _suppressTreeCheckEvents = True
+        Try
+            node.Checked = AreDirectoryFilesChecked(directory, node.Name)
+        Finally
+            _suppressTreeCheckEvents = previousSuppress
+        End Try
+        RefreshTreeNodeChecks(node.Parent)
+    End Sub
+
+    Private Sub RefreshRootNodeCheck()
+        If _tree Is Nothing OrElse _tree.Nodes.Count = 0 Then Return
+        Dim rootNode As TreeNode = _tree.Nodes(0)
+        If rootNode Is Nothing Then Return
+        Dim previousSuppress As Boolean = _suppressTreeCheckEvents
+        _suppressTreeCheckEvents = True
+        Try
+            rootNode.Checked = AreAllIndexFilesChecked()
+        Finally
+            _suppressTreeCheckEvents = previousSuppress
+        End Try
+    End Sub
+
+    ''' <summary>按当前勾选状态刷新右侧列表的勾选显示（不重建列表）。</summary>
+    Private Sub RefreshListChecks()
+        If _list Is Nothing Then Return
+        _suppressCheckEvents = True
+        Try
+            For index As Integer = 0 To _list.Items.Count - 1
+                Dim item As ListViewItem = _list.Items(index)
+                Dim entry As BrowserEntry = TryCast(item.Tag, BrowserEntry)
+                If entry Is Nothing Then Continue For
+                If entry.IsDirectory Then
+                    item.Checked = AreDirectoryFilesChecked(entry)
+                Else
+                    Dim childFile As ltfsindex.file = TryCast(entry.Item, ltfsindex.file)
+                    If childFile IsNot Nothing Then item.Checked = _checkedFiles.ContainsKey(childFile)
+                End If
+            Next
+        Finally
+            _suppressCheckEvents = False
+        End Try
+    End Sub
+
+    ''' <summary>按相对路径查找已加载的树节点；找不到时返回最接近的已加载祖先。</summary>
+    Private Function FindTreeNodeByRelativePath(relativePath As String) As TreeNode
+        If _tree Is Nothing OrElse _tree.Nodes.Count = 0 Then Return Nothing
+        Dim rootNode As TreeNode = _tree.Nodes(0)
+        If String.IsNullOrEmpty(relativePath) Then Return rootNode
+        Dim node As TreeNode = rootNode
+        For Each segment As String In relativePath.Split("\"c)
+            Dim nextNode As TreeNode = Nothing
+            For Each child As TreeNode In node.Nodes
+                If child.Name = "__placeholder" Then Continue For
+                If String.Equals(child.Text, segment, StringComparison.OrdinalIgnoreCase) Then
+                    nextNode = child
+                    Exit For
+                End If
+            Next
+            If nextNode Is Nothing Then Return node
+            node = nextNode
+        Next
+        Return node
+    End Function
+
+    ''' <summary>列表勾选变化后，同步刷新当前目录对应的树节点及其祖先。</summary>
+    Private Sub RefreshTreeChecksForPath()
+        If _tree Is Nothing OrElse _tree.Nodes.Count = 0 Then Return
+        Dim node As TreeNode = FindTreeNodeByRelativePath(_currentRelativePath)
+        If node Is Nothing Then Return
+        If IsTreeRootNode(node) Then
+            For Each child As TreeNode In node.Nodes
+                If child.Name = "__placeholder" Then Continue For
+                RefreshLoadedSubtreeChecks(child)
+            Next
+            RefreshRootNodeCheck()
+            Return
+        End If
+        RefreshTreeNodeChecks(node)
+        RefreshLoadedSubtreeChecks(node)
+    End Sub
+
+    ''' <summary>按当前勾选状态刷新指定节点及其已加载子树的勾选状态。</summary>
+    Private Sub RefreshLoadedSubtreeChecks(node As TreeNode)
+        If node Is Nothing Then Return
+        If IsTreeRootNode(node) Then Return
+        Dim directory As ltfsindex.directory = TryCast(node.Tag, ltfsindex.directory)
+        If directory Is Nothing Then Return
+        Dim previousSuppress As Boolean = _suppressTreeCheckEvents
+        _suppressTreeCheckEvents = True
+        Try
+            node.Checked = AreDirectoryFilesChecked(directory, node.Name)
+            For Each child As TreeNode In node.Nodes
+                If child.Name = "__placeholder" Then Continue For
+                RefreshLoadedSubtreeChecks(child)
+            Next
+        Finally
+            _suppressTreeCheckEvents = previousSuppress
+        End Try
+    End Sub
 
     Private Sub ListItemCheck(sender As Object, e As ItemCheckEventArgs)
         If _suppressCheckEvents Then Return
@@ -520,6 +733,7 @@ Public Class ChangerTapeBrowserForm
         If entry.IsDirectory Then
             SetDirectoryChecked(entry, e.Item.Checked)
             UpdateStatus()
+            RefreshTreeChecksForPath()
             Return
         End If
         Dim childFile As ltfsindex.file = TryCast(entry.Item, ltfsindex.file)
@@ -530,6 +744,7 @@ Public Class ChangerTapeBrowserForm
             _checkedFiles.Remove(childFile)
         End If
         UpdateStatus()
+        RefreshTreeChecksForPath()
     End Sub
 
     ''' <summary>框选（拖拽多选）后自动勾选选中的文件，行为与主程序文件列表一致。</summary>
@@ -566,6 +781,7 @@ Public Class ChangerTapeBrowserForm
             _suppressCheckEvents = False
         End Try
         UpdateStatus()
+        RefreshTreeChecksForPath()
     End Sub
 
     Private Sub SelectAllClicked(sender As Object, e As EventArgs)
@@ -587,6 +803,7 @@ Public Class ChangerTapeBrowserForm
             _suppressCheckEvents = False
         End Try
         UpdateStatus()
+        RefreshTreeChecksForPath()
     End Sub
 
     Private Sub UnselectAllClicked(sender As Object, e As EventArgs)
@@ -600,6 +817,7 @@ Public Class ChangerTapeBrowserForm
             _suppressCheckEvents = False
         End Try
         UpdateStatus()
+        RefreshTreeChecksForPath()
     End Sub
 
     Private Sub RefreshClicked(sender As Object, e As EventArgs)
